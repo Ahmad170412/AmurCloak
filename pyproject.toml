@@ -7,6 +7,8 @@ name = "amurcloak"
 version = "1.0.0"
 description = "Local face redaction for photos. Nothing leaves this machine."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 keywords = ["privacy", "redaction", "face-detection", "photos", "heic", "offline"]
 classifiers = [

@@ -11,7 +11,8 @@ No uploads, no accounts, no telemetry. Drop photos in, check the map, download r
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-23%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-24%20passing-3f6b52)](#testing)
+[![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
 [![Detector](https://img.shields.io/badge/detector-YuNet%20227%20KB-17202a)](src/amurcloak/models/)
@@ -60,16 +61,16 @@ The **audit map** shows you what was found before you commit to anything. If a f
 
 ## Quick Start
 
-**One paste.** This installs [uv](https://docs.astral.sh/uv/) — which brings its own Python — and then AmurCloak itself. The `export` is there so it works in the terminal you already have open, with no restart:
+**One paste.** This installs [uv](https://docs.astral.sh/uv/) — which brings its own Python — and then AmurCloak itself, straight from a release. The `export` is there so it works in the terminal you already have open, with no restart:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install amurcloak
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
 ```
 
 Windows, in PowerShell — same idea:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install amurcloak
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
 ```
 
 **Then, forever after:**
@@ -78,13 +79,9 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 amurcloak
 ```
 
+That wheel is the entire install — one file, and the same one on macOS, Windows and Linux, with every dependency resolved for your machine. If you would rather pull from the package index, `uv tool install amurcloak` does the same job.
+
 It takes the first free port from 5000, opens your browser, and stops on Control-C. Run it a second time and it notices the copy already running instead of starting another server.
-
-If you would rather not depend on PyPI, each release also attaches the wheel, which is a complete self-contained install:
-
-```bash
-uv tool install https://github.com/<owner>/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
-```
 
 No API keys, no configuration files, no model download — the detector ships inside the package.
 
@@ -343,7 +340,9 @@ Run both suites before committing; they are fast enough that there is no excuse 
 
 ## License
 
-**Not yet chosen.** This repository has no `LICENSE` file, which legally means all rights are reserved and nobody may reuse it. If you intend to share or publish AmurCloak, pick one — MIT or Apache-2.0 are the usual choices for a tool like this, and the vendored YuNet model carries its own upstream licence that is worth checking first.
+MIT — see [`LICENSE`](LICENSE). Use it, fork it, ship it.
+
+One component is somebody else's work: the bundled face detector, `src/amurcloak/models/face_detection_yunet_2023mar.onnx`, is YuNet by Shiqi Yu, licensed separately under MIT. Its notice travels alongside the model at [`src/amurcloak/models/LICENSE`](src/amurcloak/models/LICENSE), which is what redistribution requires.
 
 ---
 
