@@ -1,5 +1,8 @@
-# TigerBlur runtime dependencies. Deliberately tiny - no torch, no onnxruntime,
-# no ffmpeg binary. Everything here is a prebuilt arm64 wheel.
+# AmurCloak runtime dependencies. Deliberately tiny - no torch, no onnxruntime,
+# no ffmpeg binary.
+#
+# pyproject.toml is the source of truth, because that is what uv installs from.
+# This file exists for anyone using plain pip instead. Keep the two in step.
 opencv-python-headless>=4.10
 numpy>=1.26
 flask>=3.0

@@ -1,30 +1,31 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="TigerBlur logo" width="320"/>
+<img src="assets/logo.svg" alt="AmurCloak logo" width="320"/>
 
-# TigerBlur
+# AmurCloak
 
 **Find every face in a photo and cover it — on your own machine, with the network unplugged.**
 
 No uploads, no accounts, no telemetry. Drop photos in, check the map, download redacted copies.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
+[![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
 [![Tests](https://img.shields.io/badge/tests-23%20passing-3f6b52)](#testing)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
-[![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-tigerblur)
-[![Detector](https://img.shields.io/badge/detector-YuNet%20227%20KB-17202a)](models/)
+[![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
+[![Detector](https://img.shields.io/badge/detector-YuNet%20227%20KB-17202a)](src/amurcloak/models/)
 
-[Quick Start](#quick-start) · [Why](#why-tigerblur) · [Features](#features) · [Configuration](#configuration) · [Testing](#testing)
+[Quick Start](#quick-start) · [Why](#why-amurcloak) · [Features](#features) · [Configuration](#configuration) · [Testing](#testing)
 
 </div>
 
 ---
 
-## Why TigerBlur?
+## Why AmurCloak?
 
-- **Your photos never leave the machine.** There is no server to upload to, no cloud API behind a spinner, and no outbound request anywhere in the runtime. You can pull the network cable out mid-batch and nothing changes.
-- **One detection pass is not enough for group photos.** A single frame inference reliably misses the small faces at the back of a crowd. TigerBlur also scans overlapping tiles and merges the results — on the 10-face test fixture that is the difference between finding 1 face and finding 4.
+- **Your photos never leave the machine.** There is no server to upload to, no cloud API behind a spinner, and no outbound request anywhere in the runtime — the only socket the program opens is a loopback check of its own port, to tell "already running" apart from "free port". You can pull the network cable out mid-batch and nothing changes.
+- **One detection pass is not enough for group photos.** A single frame inference reliably misses the small faces at the back of a crowd. AmurCloak also scans overlapping tiles and merges the results — on the 10-face test fixture that is the difference between finding 1 face and finding 4.
 - **The default mode is the one that cannot be undone.** Solid black destroys the pixels. Pixelate and blur are *partially reversible* and are labelled as such in the interface, because "AI un-pixelation" is a real and published technique.
 - **It costs you nothing to leave running.** Every transient byte lives under one temp root: batches stream into a ZIP one file at a time, staged inputs are freed the moment you download, and a reaper clears idle sessions. Steady-state disk usage is zero.
 
@@ -38,7 +39,7 @@ The default mode, next to the two softer ones — so the trade-off is visible ra
 
 The **audit map** shows you what was found before you commit to anything. If a face is visible here, you know it is covered; if someone is missed, you can see that too and switch to a more aggressive preset:
 
-![The TigerBlur interface showing the audit map.](assets/screenshot-app.png)
+![The AmurCloak interface showing the audit map.](assets/screenshot-app.png)
 
 ---
 
@@ -59,16 +60,33 @@ The **audit map** shows you what was found before you commit to anything. If a f
 
 ## Quick Start
 
+**One paste.** This installs [uv](https://docs.astral.sh/uv/) — which brings its own Python — and then AmurCloak itself. The `export` is there so it works in the terminal you already have open, with no restart:
+
 ```bash
-cd TigerBlur
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python app.py --port 5000 --open
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install amurcloak
 ```
 
-The `--open` flag opens `http://localhost:5000` in your browser. Drop photos onto the page, or click **Choose photos**.
+Windows, in PowerShell — same idea:
 
-No API keys, no configuration files, no model download — the detector ships in the repository.
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install amurcloak
+```
+
+**Then, forever after:**
+
+```bash
+amurcloak
+```
+
+It takes the first free port from 5000, opens your browser, and stops on Control-C. Run it a second time and it notices the copy already running instead of starting another server.
+
+If you would rather not depend on PyPI, each release also attaches the wheel, which is a complete self-contained install:
+
+```bash
+uv tool install https://github.com/<owner>/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
+```
+
+No API keys, no configuration files, no model download — the detector ships inside the package.
 
 ---
 
@@ -120,7 +138,7 @@ A single process, one request at a time, no queue and no worker pool:
 | **Nine input formats** | BMP, HEIC, HEIF, JPEG, PNG, TIFF, WebP — outputs keep the original format. |
 | **Streaming batches** | Outputs are appended to a `ZIP_STORED` archive and unlinked as they go, so a batch never exists twice on disk. |
 | **Automatic cleanup** | Idle sessions are reaped, inputs are freed on download, and orphans are purged at startup. |
-| **Zero network** | No CDN, no webfonts, no telemetry. The interface is plain HTML, CSS and JavaScript with no build step. |
+| **No outbound network** | No CDN, no webfonts, no telemetry, no cloud API. The interface is plain HTML, CSS and JavaScript with no build step. |
 
 ---
 
@@ -128,9 +146,10 @@ A single process, one request at a time, no queue and no worker pool:
 
 ### Requirements
 
-- **Python 3.11 or newer** (developed and tested on 3.14)
-- **macOS** — built and verified here. The code is portable and should run on Linux, but that is untested.
-- ~200 MB of disk for the environment. The single largest piece is OpenCV's binary at 120 MB.
+- **Python 3.11 or newer.** uv supplies one if you do not have it, which matters: a clean macOS ships a 3.9 stub with a 2021-era pip that cannot install these dependencies.
+- **macOS, Windows or Linux.** The package is pure Python (`py3-none-any`), so one 251 KB wheel covers all three. The platform-specific weight comes from OpenCV's own published wheels, fetched per machine.
+- **~250 MB on first run**, almost all of it OpenCV, into uv's shared cache. Reinstalling, or any other uv project, reuses it.
+- **One download, ever.** After the first run the command works with the network off.
 
 Five dependencies, all prebuilt wheels, none of them a framework:
 
@@ -144,23 +163,41 @@ Five dependencies, all prebuilt wheels, none of them a framework:
 
 Deliberately absent: **PyTorch**, **onnxruntime**, and any **ffmpeg** binary. YuNet runs through the DNN module OpenCV already ships, which is why the model is 227 KB instead of hundreds of megabytes.
 
-### Set up
+### Install
+
+The Quick Start above is the whole thing. Two other routes, if you want them:
 
 ```bash
-git clone <this-repository> TigerBlur
-cd TigerBlur
-python3 -m venv .venv
-.venv/bin/pip install --no-cache-dir -r requirements.txt
+git clone <this-repository> AmurCloak
+cd AmurCloak && uv tool install .                       # from a checkout
+uv tool install dist/amurcloak-1.0.0-py3-none-any.whl   # from a wheel you built
 ```
 
-`--no-cache-dir` avoids keeping a second copy of the wheels in `~/.cache/pip`.
+Upgrading and removing are each one command:
+
+```bash
+uv tool upgrade amurcloak
+uv tool uninstall amurcloak
+```
+
+`uv tool install` gives each tool its own isolated environment and drops a small shim on your `PATH`. It does not touch your system Python, and uninstalling leaves nothing behind.
+
+### Working on the source
+
+The package lives under `src/`, so it imports without being installed:
+
+```bash
+uv run python -m amurcloak
+```
+
+`requirements.txt` carries the same pins for anyone using plain `pip` instead of uv.
 
 ### Verify the model
 
-The detector is vendored, and its checksum is verified on startup:
+The detector is vendored inside the package, and its checksum is verified on startup:
 
 ```bash
-shasum -a 256 models/face_detection_yunet_2023mar.onnx
+shasum -a 256 src/amurcloak/models/face_detection_yunet_2023mar.onnx
 # 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
 ```
 
@@ -171,20 +208,22 @@ shasum -a 256 models/face_detection_yunet_2023mar.onnx
 Everything is a command-line flag. There are no environment variables and no config file.
 
 ```bash
-.venv/bin/python app.py [flags]
+amurcloak [flags]
 ```
+
+Running `amurcloak` with no flags picks the port and opens the browser — that is the intended way to use it. The flags exist for the corners.
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind address. Localhost only — do not expose this. |
-| `--port` | `5000` | Change it if the port is already in use. |
-| `--tmp` | `.tmp` | Temp root for uploads and output. |
+| `--port` | first free from `5000` | Pass one explicitly to pin it. |
+| `--tmp` | the system temp directory | Where uploads and renders are staged. Never inside the package. |
+| `--no-open` | off | Do not open the browser. For SSH, scripts and headless runs. |
 | `--ttl` | `1800` | Seconds of inactivity before a session is reaped. |
 | `--max-age` | `21600` | Hard limit on a session's age, in seconds. |
 | `--shred` | off | Zero-fill temp files before unlinking. Slower; costs a full write pass. |
 | `--keep-inputs` | off | Keep staged uploads after download instead of freeing them. |
 | `--allow-download` | off | Permit a one-time model fetch if the vendored model is missing. |
-| `--open` | off | Open the browser on start. |
 | `--debug` | off | Flask debug mode. |
 
 ### Limits
@@ -212,6 +251,8 @@ An upload that will not fit is refused **before** anything is written, and the e
 
 Settings apply to the whole staged set, and changing any of them invalidates a rendered result rather than letting you download pixels that no longer match what is on screen.
 
+A batch is held in the running server's memory, so quitting `amurcloak` — or leaving a batch untouched past `--ttl` — clears it. The page notices and asks for the photos again rather than leaving a stale preview up, which matters because a frame that no longer matches its settings is worse than no frame at all.
+
 ### Presets
 
 | Preset | Confidence | Smallest face | Inference edge | Use it for |
@@ -231,8 +272,8 @@ Detection is tens of milliseconds on a phone-sized photo, and a few hundred mill
 Two suites, no test framework, no fixtures to download:
 
 ```bash
-.venv/bin/python tests/test_engine.py   # 12/12 — detection, masking, colour, metadata, formats
-.venv/bin/python tests/test_api.py      # 11/11 — upload, tune, preview, render, download, disk
+uv run python tests/test_engine.py   # 12/12 — detection, masking, colour, metadata, formats
+uv run python tests/test_api.py      # 11/11 — upload, tune, preview, render, download, disk
 ```
 
 The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks.
@@ -254,25 +295,31 @@ The last two exist because both were real bugs — an upload that silently faile
 ## Repository Structure
 
 ```text
-TigerBlur/
+AmurCloak/
 ├── README.md
-├── app.py                        # Flask routes, CLI, config, lifecycle
-├── requirements.txt              # 5 dependencies
-├── engine/
-│   ├── detector.py               # YuNet wrapper: tiling, NMS, ranking
-│   ├── redact.py                 # ellipse geometry, three modes, audit map
-│   ├── photo.py                  # decode/encode, EXIF, metadata stripping
-│   ├── pipeline.py               # full-resolution preview composition
-│   ├── presets.py                # modes, presets, settings resolution
-│   ├── sessions.py               # staging, disk accounting, renderer, reaper
-│   └── __init__.py
-├── models/
-│   └── face_detection_yunet_2023mar.onnx   # 227 KB, checksum verified
-├── templates/
-│   └── index.html                # the single page
-├── static/
-│   ├── style.css                 # the whole stylesheet
-│   └── app.js                    # the whole front end, no build step
+├── pyproject.toml                # metadata, the 5 dependencies, the entry point
+├── requirements.txt              # the same pins, for plain pip
+├── src/
+│   └── amurcloak/
+│       ├── __init__.py           # version
+│       ├── __main__.py           # python -m amurcloak
+│       ├── cli.py                # free-port search, already-running check, browser
+│       ├── app.py                # Flask routes, config, flags, lifecycle
+│       ├── engine/
+│       │   ├── detector.py       # YuNet wrapper: tiling, NMS, ranking
+│       │   ├── redact.py         # ellipse geometry, three modes, audit map
+│       │   ├── photo.py          # decode/encode, EXIF, metadata stripping
+│       │   ├── pipeline.py       # full-resolution preview composition
+│       │   ├── presets.py        # modes, presets, settings resolution
+│       │   ├── sessions.py       # staging, disk accounting, renderer, reaper
+│       │   └── __init__.py
+│       ├── models/
+│       │   └── face_detection_yunet_2023mar.onnx   # 227 KB, checksum verified
+│       ├── templates/
+│       │   └── index.html        # the single page
+│       └── static/
+│           ├── style.css         # the whole stylesheet
+│           └── app.js            # the whole front end, no build step
 ├── assets/                       # logo and screenshots
 └── tests/
     ├── test_engine.py            # 12 tests
@@ -286,7 +333,7 @@ TigerBlur/
 
 This is a private tool, so there is no contribution process to speak of. If you do extend it, three rules keep it honest:
 
-1. **Nothing may call out to the network at runtime.** That is the entire point of the project.
+1. **Nothing may make an outbound network call at runtime.** That is the entire point of the project. The one request AmurCloak ever makes is a loopback probe of its own port, to tell "already running" apart from "free port" — it is pinned to `127.0.0.1` and deliberately ignores any proxy set in the environment, so it cannot become an outbound request by accident.
 2. **A preview must never disagree with the delivered file.** Previews are composed at full resolution and only then downscaled — shrinking first would change the blur kernel and the block size.
 3. **Never describe a reversible redaction as safe.** If a mode can be partially undone, the interface has to say so.
 
@@ -296,7 +343,7 @@ Run both suites before committing; they are fast enough that there is no excuse 
 
 ## License
 
-**Not yet chosen.** This repository has no `LICENSE` file, which legally means all rights are reserved and nobody may reuse it. If you intend to share or publish TigerBlur, pick one — MIT or Apache-2.0 are the usual choices for a tool like this, and the vendored YuNet model carries its own upstream licence that is worth checking first.
+**Not yet chosen.** This repository has no `LICENSE` file, which legally means all rights are reserved and nobody may reuse it. If you intend to share or publish AmurCloak, pick one — MIT or Apache-2.0 are the usual choices for a tool like this, and the vendored YuNet model carries its own upstream licence that is worth checking first.
 
 ---
 

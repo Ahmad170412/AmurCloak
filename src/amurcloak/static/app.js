@@ -1,4 +1,4 @@
-/* TigerBlur front end.
+/* AmurCloak front end.
    No framework, no build step, no external requests - the page must keep
    working with the network unplugged, which is the whole point of the tool. */
 
@@ -204,6 +204,15 @@
         });
         refreshPreview();
       } catch (error) {
+        if (isSessionGone(error)) {
+          sessionLost();
+          return;
+        }
+        // The controls now say one thing and the pixels on screen say another,
+        // so clear the frame rather than let a redaction sit under settings it
+        // was not made with.
+        el.previewImg.removeAttribute("src");
+        clearViewerCaption();
         setNote(error.message);
       }
     }, 130);
@@ -213,6 +222,38 @@
 
   function setNote(text) {
     el.viewerNote.textContent = text || "";
+  }
+
+  /** A frame with no image must not keep a name sitting next to it. */
+  function clearViewerCaption() {
+    el.viewerName.textContent = "";
+    el.viewerIndex.textContent = "";
+  }
+
+  function isSessionGone(error) {
+    // Every session-scoped route answers 404 once the store has forgotten the
+    // session, so a 404 here means "this batch is gone", not "bad request".
+    return Boolean(error) && error.status === 404;
+  }
+
+  /**
+   * The server keeps batches in memory. Restarting it, or leaving one idle long
+   * enough for the reaper, loses the staged photos, and every later call for
+   * that session 404s. Nothing can be recovered, so tear the view down
+   * coherently and say so.
+   *
+   * Ignoring this is worse than useless. A mode click would 404 on /settings,
+   * silently fail, and leave the *previous* redaction on screen under the new
+   * settings - a frame that disagrees with the controls beside it. And a view
+   * toggle would 404 on /preview and blank the image while its name stayed put,
+   * which reads as a bug rather than as "your batch is gone".
+   */
+  function sessionLost() {
+    if (!state.sid && !state.snapshot) return; // nothing to tear down
+    reset({ quiet: true }).then(() => {
+      el.actionNote.textContent =
+        "This batch is no longer on the server. It starts empty and clears a batch left idle, so the photos need to go in again.";
+    });
   }
 
   async function refreshPreview() {
@@ -240,7 +281,13 @@
       }
     } catch (error) {
       if (token !== state.previewToken) return;
+      if (isSessionGone(error)) {
+        sessionLost();
+        return;
+      }
+      // No image, so no caption either: a named empty frame reads as a bug.
       el.previewImg.removeAttribute("src");
+      clearViewerCaption();
       setNote(error.message);
     } finally {
       if (token === state.previewToken) el.viewerLoading.hidden = true;
@@ -651,8 +698,12 @@
       applySnapshot(snapshot);
       pollUntilDone();
     } catch (error) {
-      el.actionNote.textContent = error.message;
       state.busy = false;
+      if (isSessionGone(error)) {
+        sessionLost();
+        return;
+      }
+      el.actionNote.textContent = error.message;
     }
   }
 
@@ -671,6 +722,10 @@
         pollUntilDone();
       } catch (error) {
         state.busy = false;
+        if (isSessionGone(error)) {
+          sessionLost();
+          return;
+        }
         setNote(error.message);
       }
     }, 320);
@@ -678,7 +733,7 @@
 
   function download() {
     if (!state.sid || !state.snapshot || !state.snapshot.result.ready) return;
-    const name = state.snapshot.result.name || "tigerblur-output";
+    const name = state.snapshot.result.name || "amurcloak-output";
     const link = document.createElement("a");
     link.href = `/api/sessions/${state.sid}/result`;
     link.download = name;
@@ -693,8 +748,10 @@
     if (!state.sid) return;
     try {
       applySnapshot(await api(`/api/sessions/${state.sid}`));
-    } catch {
-      /* session may have been reaped */
+    } catch (error) {
+      // This is the cheap liveness check, so it is also where a restarted or
+      // reaped-away session gets noticed before the user touches anything.
+      if (isSessionGone(error)) sessionLost();
     }
   }
 
@@ -824,6 +881,13 @@
       if (event.key === "ArrowLeft") selectIndex(state.index - 1);
       if (event.key === "ArrowRight") selectIndex(state.index + 1);
     });
+
+    // Coming back to the tab is where a stale batch is most likely and most
+    // confusing - the window may have been sitting there across a restart. So
+    // check the batch is still there before the user clicks anything.
+    window.addEventListener("focus", () => {
+      if (state.sid) pollOnce();
+    });
   }
 
   /* ── boot ────────────────────────────────────────────────────── */
@@ -833,7 +897,7 @@
     try {
       config = await api("/api/config");
     } catch (error) {
-      el.actionNote.textContent = "Could not reach the TigerBlur server.";
+      el.actionNote.textContent = "Could not reach the AmurCloak server.";
       return;
     }
     state.config = config;
@@ -874,7 +938,7 @@
       el.formatsLine.textContent = `Reads ${names.join(", ")}. Redacted copies keep the original format.`;
     } catch (error) {
       // Photos still work; only the cosmetic chrome is degraded.
-      console.error("TigerBlur: could not draw the controls", error);
+      console.error("AmurCloak: could not draw the controls", error);
     }
   }
 

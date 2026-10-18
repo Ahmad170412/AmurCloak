@@ -1,4 +1,4 @@
-"""TigerBlur web app.
+"""AmurCloak web app.
 
 Binds to localhost only, by default. Nothing in this process makes an outbound
 network call at runtime - the one exception is ``--allow-download``, which
@@ -6,8 +6,7 @@ fetches the 232KB face model once if it is missing.
 
 Disk posture:
 * ``tempfile.tempdir`` is redirected into the app's own temp root, so the
-  multipart spool from an upload lands somewhere the user can see and delete
-  rather than hiding in the system temp directory.
+  multipart spool from an upload lands inside the same folder the reaper owns.
 * Inputs are freed automatically once a result has been downloaded.
 * A background reaper clears idle sessions, and startup purges orphans.
 """
@@ -34,11 +33,12 @@ from flask import (
     send_file,
 )
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.serving import make_server
 
-from engine import photo as photo_io
-from engine import pipeline, presets
-from engine.detector import FaceDetector, ensure_model
-from engine.sessions import (
+from .engine import photo as photo_io
+from .engine import pipeline, presets
+from .engine.detector import FaceDetector, ensure_model
+from .engine.sessions import (
     DEFAULT_TMP,
     MAX_FILES,
     MAX_FILE_BYTES,
@@ -53,6 +53,11 @@ from engine.sessions import (
 )
 
 CHUNK = 1 << 20
+
+# Returned by run_app() when the port could not be bound, so the CLI can move
+# to the next one. Deliberately not 3 -- Werkzeug's reloader uses exit code 3
+# as its "restart me" signal.
+BIND_FAILED = 4
 
 
 @dataclass
@@ -292,7 +297,10 @@ def create_app(config: Config | None = None):
         if view not in ("result", "audit"):
             view = "result"
         if not session.items:
-            abort(404)
+            # The page reads 404 as "this batch is gone" and resets itself, so a
+            # session that exists but holds nothing must not answer 404. 409 is
+            # what the result route already uses for "not ready yet".
+            return jsonify({"error": "nothing is staged to preview"}), 409
         index = max(0, min(index, len(session.items) - 1))
         item = session.items[index]
 
@@ -373,7 +381,7 @@ def create_app(config: Config | None = None):
         response = send_file(
             str(path),
             as_attachment=True,
-            download_name=name or "tigerblur-output",
+            download_name=name or "amurcloak-output",
             conditional=True,
         )
         response.headers["Cache-Control"] = "no-store"
@@ -430,11 +438,16 @@ def create_app(config: Config | None = None):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        prog="tigerblur",
+        prog="amurcloak",
         description="Local face redaction for photos. Nothing leaves this machine.",
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: localhost only)")
-    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="port to bind (default: the first free port from 5000)",
+    )
     parser.add_argument("--tmp", default=str(DEFAULT_TMP), help="temp root for uploads and output")
     parser.add_argument("--ttl", type=float, default=SESSION_TTL_SEC, help="idle seconds before a session is reaped")
     parser.add_argument("--max-age", type=float, default=SESSION_MAX_AGE_SEC, help="hard session age limit in seconds")
@@ -442,13 +455,12 @@ def parse_args(argv=None):
     parser.add_argument("--keep-inputs", action="store_true", help="do not free staged uploads after download")
     parser.add_argument("--allow-download", action="store_true", help="permit a one-time model download if it is missing")
     parser.add_argument("--open", action="store_true", help="open the browser on start")
+    parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> int:
-    args = parse_args(argv)
-
+def run_app(args) -> int:
     try:
         model = ensure_model(allow_download=args.allow_download)
     except Exception as exc:
@@ -461,7 +473,7 @@ def main(argv=None) -> int:
         max_age=args.max_age,
         shred=args.shred,
         host=args.host,
-        port=args.port,
+        port=args.port if args.port is not None else 5000,
         allow_download=args.allow_download,
         free_after_download=not args.keep_inputs,
     )
@@ -471,7 +483,7 @@ def main(argv=None) -> int:
     usage = store.usage()
 
     url = f"http://{'localhost' if config.host == '127.0.0.1' else config.host}:{config.port}"
-    print("\n  TigerBlur")
+    print("\n  AmurCloak")
     print("  " + "-" * 46)
     print(f"  model      {model.name} ({model.stat().st_size / 1024:.0f}KB, checksum verified)")
     print(f"  temp root  {config.tmp_root}")
@@ -479,13 +491,43 @@ def main(argv=None) -> int:
     print(f"  session    reaped after {int(config.ttl / 60)}min idle")
     print("  network    none at runtime - no uploads, no telemetry")
     print("  " + "-" * 46)
-    print(f"  open       {url}\n")
+    print(f"  open       {url}")
+    print("  stop       press Control-C\n")
 
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
 
-    app.run(host=config.host, port=config.port, debug=args.debug, threaded=True)
+    if args.debug:
+        # Keep Werkzeug's reloader. A debug run is for whoever is editing the
+        # code, and they can read a port error.
+        app.run(host=config.host, port=config.port, debug=True, threaded=True)
+        return 0
+
+    # Bind directly rather than through app.run(). app.run() does *not* raise
+    # when the port is taken -- it prints its own message and calls sys.exit(),
+    # which leaves the caller nothing to catch. make_server raises OSError, so
+    # the port can be retried and the user never sees a failure.
+    # Werkzeug does not raise when the port is taken. make_server prints its own
+    # message and calls sys.exit(), which would kill the process with nothing
+    # catchable (confirmed against werkzeug 3.1.9). Treat either shape as a
+    # retryable bind failure so the CLI can move on to the next port.
+    try:
+        server = make_server(config.host, config.port, app, threaded=True)
+    except (SystemExit, OSError):
+        return BIND_FAILED
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Stopped.")
+    finally:
+        server.server_close()
     return 0
+
+
+def main(argv=None) -> int:
+    """Plain entry point: run with whatever the flags say, no port hunting."""
+    return run_app(parse_args(argv))
 
 
 if __name__ == "__main__":

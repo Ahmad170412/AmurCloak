@@ -3,13 +3,22 @@
 __pycache__/
 *.pyc
 
-# Runtime scratch space: uploads, renders, and the multipart spool.
-# Everything here is transient by design and is reaped automatically.
+# Build output. `uv build` writes its own self-ignoring dist/.gitignore; these
+# cover the other tools and the sdist's egg-info.
+dist/
+build/
+*.egg-info/
+
+# Runtime scratch space for the --tmp flag. The default temp root now lives in
+# the system temp directory, so this only appears if --tmp points back here.
 .tmp/
 
 # Rebuilt on demand by the fixture builders in tests/test_engine.py,
 # so the generated fixtures are not worth tracking.
 tests/fixtures/gen/
+
+# Browser-verification scratch
+.playwright-mcp/
 
 # macOS
 .DS_Store

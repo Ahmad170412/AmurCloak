@@ -2,8 +2,9 @@
 
 Disk is the scarce resource in this project, so the design leans on it directly:
 
-* Everything transient lives under one root (``.tmp`` by default) that a single
-  reaper owns. Nothing hides in the system temp directory.
+* Everything transient lives under one root (a per-user folder inside the
+  system temp directory) that a single reaper owns, so a crash or a hard kill
+  cannot leave debris scattered across the filesystem.
 * A batch is streamed into a zip: each rendered file is appended and unlinked
   immediately, so the peak footprint is ``inputs + zip + one file`` rather than
   ``inputs + outputs + zip``.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import queue
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -37,7 +39,10 @@ from .presets import Settings, build as build_settings
 # limits
 # ---------------------------------------------------------------------------
 
-DEFAULT_TMP = Path(__file__).resolve().parent.parent / ".tmp"
+# The temp root must never resolve inside the package: installed, this file
+# lives in site-packages, which is not ours to write to. The system temp
+# directory is per-user on both macOS and Windows and is cleaned up by the OS.
+DEFAULT_TMP = Path(tempfile.gettempdir()) / "amurcloak"
 
 MAX_FILES = 300
 MAX_FILE_BYTES = 200 * 1024 * 1024
@@ -489,7 +494,7 @@ class SessionStore:
                 except Exception:
                     pass
 
-        thread = threading.Thread(target=loop, name="tigerblur-reaper", daemon=True)
+        thread = threading.Thread(target=loop, name="amurcloak-reaper", daemon=True)
         thread.start()
         return thread
 
@@ -505,7 +510,7 @@ class Renderer:
     def __init__(self, store: SessionStore) -> None:
         self.store = store
         self.queue: queue.Queue[str] = queue.Queue()
-        self.thread = threading.Thread(target=self._loop, name="tigerblur-render", daemon=True)
+        self.thread = threading.Thread(target=self._loop, name="amurcloak-render", daemon=True)
         self.thread.start()
 
     def submit(self, session: Session) -> None:
@@ -637,7 +642,7 @@ class Renderer:
                     zip_tmp.replace(zip_final)
                     shutil.rmtree(session.out_dir, ignore_errors=True)
                     session.result_path = zip_final
-                    session.result_name = "tigerblur-redacted.zip"
+                    session.result_name = "amurcloak-redacted.zip"
                     session.result_size = zip_final.stat().st_size
                 else:
                     # Exactly one success: hand back the image itself, not a

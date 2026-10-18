@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amurcloak"
+version = "1.0.0"
+description = "Local face redaction for photos. Nothing leaves this machine."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["privacy", "redaction", "face-detection", "photos", "heic", "offline"]
+classifiers = [
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Security",
+]
+
+# Deliberately tiny: no torch, no onnxruntime, no ffmpeg binary. YuNet runs
+# through the DNN module OpenCV already ships, and every entry here has prebuilt
+# wheels on PyPI for macOS, Windows and Linux.
+dependencies = [
+    "flask>=3.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "pillow>=10.0",
+    "pillow-heif>=0.16",
+]
+
+[project.scripts]
+amurcloak = "amurcloak.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amurcloak"]

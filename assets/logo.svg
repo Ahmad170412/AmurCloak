@@ -1,22 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80" width="320" height="80" role="img" aria-label="TigerBlur">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80" width="320" height="80" role="img" aria-label="AmurCloak">
   <defs>
-    <linearGradient id="tb-bg" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="ac-bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#17202a"/>
       <stop offset="1" stop-color="#222e3b"/>
     </linearGradient>
-    <linearGradient id="tb-word" x1="0" y1="0" x2="1" y2="0">
+    <linearGradient id="ac-word" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#f7f9fa"/>
       <stop offset="0.72" stop-color="#f0dfc9"/>
       <stop offset="1" stop-color="#c97a2b"/>
     </linearGradient>
-    <radialGradient id="tb-glow" cx="0.5" cy="0.5" r="0.5">
+    <radialGradient id="ac-glow" cx="0.5" cy="0.5" r="0.5">
       <stop offset="0" stop-color="#c97a2b" stop-opacity="0.30"/>
       <stop offset="1" stop-color="#c97a2b" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
-  <rect width="320" height="80" rx="14" fill="url(#tb-bg)"/>
-  <circle cx="44" cy="40" r="58" fill="url(#tb-glow)"/>
+  <rect width="320" height="80" rx="14" fill="url(#ac-bg)"/>
+  <circle cx="44" cy="40" r="58" fill="url(#ac-glow)"/>
 
   <!-- the app's own mark: three tiger stripes, roll-tilted like the mask -->
   <rect x="18" y="18" width="44" height="44" rx="11" fill="#1d2733" stroke="#c97a2b" stroke-opacity="0.55"/>
@@ -28,7 +28,7 @@
     </g>
   </g>
 
-  <text x="76" y="38" font-family="ui-serif, 'Iowan Old Style', Georgia, 'Times New Roman', serif" font-size="25" font-weight="600" letter-spacing="-0.4" fill="url(#tb-word)">TigerBlur</text>
+  <text x="76" y="38" font-family="ui-serif, 'Iowan Old Style', Georgia, 'Times New Roman', serif" font-size="25" font-weight="600" letter-spacing="-0.4" fill="url(#ac-word)">AmurCloak</text>
 
   <line x1="77" y1="47" x2="196" y2="47" stroke="#3a4a59" stroke-width="1"/>
 

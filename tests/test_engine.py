@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""TigerBlur engine tests.
+"""AmurCloak engine tests.
 
 Run with:  .venv/bin/python tests/test_engine.py
 
@@ -21,11 +21,12 @@ import numpy as np
 from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+# The package lives under src/, so that is what has to be importable here.
+sys.path.insert(0, str(ROOT / "src"))
 
-from engine import photo, redact  # noqa: E402
-from engine.detector import FaceDetector  # noqa: E402
-from engine.presets import build  # noqa: E402
+from amurcloak.engine import photo, redact  # noqa: E402
+from amurcloak.engine.detector import FaceDetector  # noqa: E402
+from amurcloak.engine.presets import build  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 GEN = FIXTURES / "gen"
@@ -343,7 +344,7 @@ def t_presets():
         require(p.score > 0, key)
         require(p.min_face >= 12, key)
     # Untrusted input must not produce a weaker-than-black default.
-    from engine.presets import from_payload
+    from amurcloak.engine.presets import from_payload
 
     s2 = from_payload({"mode": "nonsense", "margin": "999", "preset": "nope"})
     require(s2.mode == "black", "bad mode fell through to something unsafe")
@@ -354,7 +355,7 @@ def t_presets():
 
 
 def main() -> int:
-    print("TigerBlur engine tests\n" + "-" * 46)
+    print("AmurCloak engine tests\n" + "-" * 46)
     for name, fn in TESTS:
         try:
             fn()
