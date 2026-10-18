@@ -7,6 +7,7 @@ default can never drift out of sync between them.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 
 # ---------------------------------------------------------------------------
@@ -210,9 +211,16 @@ def from_payload(payload: dict) -> Settings:
     def _num(key: str) -> float | None:
         try:
             raw = payload.get(key)
-            return None if raw is None else float(raw)
+            if raw is None:
+                return None
+            value = float(raw)
         except (TypeError, ValueError):
             return None
+        # Reject inf and nan. A non-finite margin would reach the mask geometry
+        # and either raise deep inside the render or, worse, quietly produce a
+        # mask that covers nothing. A malformed field degrades to the default,
+        # which is what the docstring above promises.
+        return value if math.isfinite(value) else None
 
     def _flag(key: str) -> bool | None:
         raw = payload.get(key)

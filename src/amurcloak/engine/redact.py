@@ -72,10 +72,10 @@ def _rotated_bounds(ell: Ellipse, width: int, height: int) -> tuple[int, int, in
     half_w = math.sqrt((ell.ax * cos_t) ** 2 + (ell.ay * sin_t) ** 2)
     half_h = math.sqrt((ell.ax * sin_t) ** 2 + (ell.ay * cos_t) ** 2)
 
-    x0 = max(0, int(math.floor(ell.cx - half_w)))
-    y0 = max(0, int(math.floor(ell.cy - half_h)))
-    x1 = min(width, int(math.ceil(ell.cx + half_w)))
-    y1 = min(height, int(math.ceil(ell.cy + half_h)))
+    x0 = max(0, math.floor(ell.cx - half_w))
+    y0 = max(0, math.floor(ell.cy - half_h))
+    x1 = min(width, math.ceil(ell.cx + half_w))
+    y1 = min(height, math.ceil(ell.cy + half_h))
     return x0, y0, x1, y1
 
 
@@ -85,8 +85,8 @@ def _alpha_mask(
     """Antialiased coverage mask in [0,1] for one ellipse within a ROI."""
     h, w = size
     mask = np.zeros((h, w), dtype=np.uint8)
-    center = (int(round(ell.cx - offset[0])), int(round(ell.cy - offset[1])))
-    axes = (max(1, int(round(ell.ax))), max(1, int(round(ell.ay))))
+    center = (round(ell.cx - offset[0]), round(ell.cy - offset[1]))
+    axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
 
     # Filled hard body, then an antialiased rim. The rim is what removes the
     # stair-stepping a plain filled ellipse leaves on a large mask, and because
@@ -98,24 +98,24 @@ def _alpha_mask(
 
 
 def _odd(value: int, low: int = 15, high: int = 201) -> int:
-    value = max(low, min(high, int(value)))
+    value = max(low, min(high, value))
     return value if value % 2 == 1 else value + 1
 
 
 def _blur_kernel(face: Face, strength: float) -> int:
     factor = 0.20 + 0.60 * strength
-    return _odd(int(round(face.short_side * factor)))
+    return _odd(round(face.short_side * factor))
 
 
 def _pixelate_roi(roi: np.ndarray, face: Face, strength: float) -> np.ndarray:
-    blocks = int(round(8 + (1.0 - strength) * 14))
+    blocks = round(8 + (1.0 - strength) * 14)
     blocks = max(4, min(24, blocks))
 
     h, w = roi.shape[:2]
     short = max(1.0, min(face.w, face.h))
     k = blocks / short
-    down_w = max(1, int(round(w * k)))
-    down_h = max(1, int(round(h * k)))
+    down_w = max(1, round(w * k))
+    down_h = max(1, round(h * k))
 
     small = cv2.resize(roi, (down_w, down_h), interpolation=cv2.INTER_AREA)
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -182,10 +182,10 @@ def render_audit(bgr: np.ndarray, faces: list[Face], margin: float = 0.14) -> np
     height, width = canvas.shape[:2]
     tint = canvas.copy()
 
-    for index, face in enumerate(faces, start=1):
+    for face in faces:
         ell = ellipse_from_face(face, margin)
-        center = (int(round(ell.cx)), int(round(ell.cy)))
-        axes = (max(1, int(round(ell.ax))), max(1, int(round(ell.ay))))
+        center = (round(ell.cx), round(ell.cy))
+        axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
         cv2.ellipse(tint, center, axes, ell.angle, 0, 360, AUDIT_ACCENT, -1, cv2.LINE_AA)
 
     # Translucent wash so the covered region reads at a glance without hiding
@@ -194,8 +194,8 @@ def render_audit(bgr: np.ndarray, faces: list[Face], margin: float = 0.14) -> np
 
     for index, face in enumerate(faces, start=1):
         ell = ellipse_from_face(face, margin)
-        center = (int(round(ell.cx)), int(round(ell.cy)))
-        axes = (max(1, int(round(ell.ax))), max(1, int(round(ell.ay))))
+        center = (round(ell.cx), round(ell.cy))
+        axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
         cv2.ellipse(canvas, center, axes, ell.angle, 0, 360, AUDIT_ACCENT, 2, cv2.LINE_AA)
 
         bx0 = int(max(0, face.x))

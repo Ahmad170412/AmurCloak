@@ -5,4 +5,4 @@ single source of truth for tuning values. Nothing in this package reads a
 default from anywhere else.
 """
 
-__all__ = ["presets", "photo", "detector", "redact", "pipeline", "sessions"]
+__all__ = ["detector", "photo", "pipeline", "presets", "redact", "sessions"]

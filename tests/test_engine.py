@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from amurcloak.engine import photo, redact  # noqa: E402
 from amurcloak.engine.detector import FaceDetector  # noqa: E402
-from amurcloak.engine.presets import build  # noqa: E402
+from amurcloak.engine.presets import build, from_payload  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 GEN = FIXTURES / "gen"
@@ -326,8 +326,8 @@ def t_bomb_guard():
     photo.MAX_PIXELS = 1000
     try:
         photo.load_photo(LENA)
-        raise AssertionError("expected PhotoTooLarge")
-    except photo.PhotoTooLarge:
+        raise AssertionError("expected PhotoTooLargeError")
+    except photo.PhotoTooLargeError:
         pass
     finally:
         photo.MAX_PIXELS = old
@@ -344,11 +344,20 @@ def t_presets():
         require(p.score > 0, key)
         require(p.min_face >= 12, key)
     # Untrusted input must not produce a weaker-than-black default.
-    from amurcloak.engine.presets import from_payload
-
     s2 = from_payload({"mode": "nonsense", "margin": "999", "preset": "nope"})
     require(s2.mode == "black", "bad mode fell through to something unsafe")
     require(s2.margin <= 0.6, "margin was not clamped")
+
+
+@check("a non-finite slider value degrades to the default, not into the mask")
+def t_payload_rejects_non_finite():
+    # float('nan') parses fine, so without an explicit guard it would flow into
+    # the ellipse geometry and either raise mid-render or build a mask that
+    # covers nothing. Both outcomes are unacceptable; the default is not.
+    s = from_payload({"margin": "nan", "strength": "inf", "quality": "-inf"})
+    require(math.isfinite(s.margin) and s.margin == 0.14, f"margin leaked as {s.margin}")
+    require(math.isfinite(s.strength) and s.strength == 0.7, f"strength leaked as {s.strength}")
+    require(math.isfinite(s.strength) and s.quality == 95, f"quality leaked as {s.quality}")
 
 
 # ---------------------------------------------------------------------------

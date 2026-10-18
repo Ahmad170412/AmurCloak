@@ -56,7 +56,7 @@ def downscale(image: np.ndarray, max_edge: int = PREVIEW_MAX_EDGE) -> np.ndarray
     scale = max_edge / float(longest)
     return cv2.resize(
         image,
-        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        (max(1, round(w * scale)), max(1, round(h * scale))),
         interpolation=cv2.INTER_AREA,
     )
 

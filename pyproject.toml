@@ -41,3 +41,58 @@ amurcloak = "amurcloak.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/amurcloak"]
+
+[tool.ruff]
+# 100 rather than the 88 that is common elsewhere: several call sites here carry
+# a full argument list plus an inline comment, and wrapping them makes the
+# pipeline harder to read, not easier.
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PIE",  # flake8-pie
+    "RET",  # flake8-return
+    "PERF", # perflint
+    "RUF",  # ruff-specific
+    "ARG",  # unused arguments
+    "PTH",  # prefer pathlib
+    "LOG",  # logging
+    "G",    # logging format
+    "ISC",  # implicit string concatenation
+    "N",    # pep8-naming
+    "DTZ",  # naive datetimes
+    "PL",   # pylint
+    # Enabled on purpose for a privacy tool. A broad `except` that swallows a
+    # failure can turn "the redaction threw" into output that merely looks
+    # redacted, so every blind catch here has to say why it is safe.
+    "BLE",  # flake8-blind-except
+    "S",    # flake8-bandit
+]
+ignore = [
+    "PLR0912", # too many branches
+    "PLR0913", # too many arguments
+    "PLR0915", # too many statements - these three are length heuristics, and
+               # the functions they fire on are linear steps or keyword-only
+               # configuration objects that read better left whole
+    "PLR2004", # magic value in comparison - the tunables already live as named
+               # constants at the top of presets.py and sessions.py; repeating
+               # them in each comparison would not make the intent clearer
+    "PLC0415", # import-outside-top-level - deliberate in detector.ensure_model,
+               # where the project's one network import stays inside the single
+               # function that may perform it, behind --allow-download
+]
+
+[tool.ruff.lint.isort]
+# Keep `from .presets import Settings, build as build_settings` on one line
+# instead of splitting the alias onto its own statement.
+combine-as-imports = true

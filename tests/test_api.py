@@ -14,12 +14,11 @@ import json
 import shutil
 import sys
 import tempfile
-import uuid
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -197,6 +196,39 @@ def t_batch_zip_and_reclaim():
             f"inputs should be freed after download, got {after['disk']['inputs']}",
         )
         require(after["disk"]["result"] > 0, "result must survive the reclaim")
+    finally:
+        teardown(app, root)
+
+
+@check("a batch that loses all but one file at render still delivers that file")
+def t_single_survivor_batch():
+    # Both names pass the upload extension check, so the batch looks multi-file
+    # and the renderer spools to a zip before it can know that one of them will
+    # fail to decode. The survivor has to be handed back on its own regardless.
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        response = upload(client, [LENA, None], names=["good.jpg", "broken.jpg"])
+        require(response.status_code == 201, "batch with a bad file should still stage")
+        sid = response.get_json()["id"]
+
+        snapshot = render_and_wait(client, sid)
+        require(snapshot["state"] == "ready", f"good file should render: {snapshot['error']}")
+        require(snapshot["result"]["ready"], "session says ready but no result file exists")
+        require(snapshot["result"]["size"] > 0, "result has no size")
+        require(
+            not snapshot["result"]["name"].endswith(".zip"),
+            "one surviving output should not be wrapped in a zip",
+        )
+
+        downloaded = client.get(f"/api/sessions/{sid}/result")
+        require(downloaded.status_code == 200, f"download returned {downloaded.status_code}")
+        require(downloaded.data[:2] == b"\xff\xd8", "survivor is not a JPEG")
+        require(len(downloaded.data) > 500, "survivor looks empty")
+
+        by_name = {item["name"]: item for item in snapshot["items"]}
+        require(by_name["good.jpg"]["status"] == "done", "good file should be done")
+        require(by_name["broken.jpg"]["status"] == "error", "undecodable file should be an error")
     finally:
         teardown(app, root)
 

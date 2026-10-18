@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import tempfile
 import threading
@@ -35,13 +36,12 @@ from flask import (
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.serving import make_server
 
-from .engine import photo as photo_io
-from .engine import pipeline, presets
+from .engine import photo as photo_io, pipeline, presets
 from .engine.detector import FaceDetector, ensure_model
 from .engine.sessions import (
     DEFAULT_TMP,
-    MAX_FILES,
     MAX_FILE_BYTES,
+    MAX_FILES,
     MAX_SESSION_BYTES,
     SESSION_MAX_AGE_SEC,
     SESSION_TTL_SEC,
@@ -235,7 +235,7 @@ def create_app(config: Config | None = None):
             size = 0
             failure: str | None = None
             try:
-                with open(destination, "wb") as handle:
+                with destination.open("wb") as handle:
                     while True:
                         chunk = upload.stream.read(CHUNK)
                         if not chunk:
@@ -324,7 +324,6 @@ def create_app(config: Config | None = None):
                 "meta": item.meta,
                 "image": base64.b64encode(image).decode("ascii"),
                 "ms": int((time.perf_counter() - started) * 1000),
-                "note": report["note"],
             }
         )
         response = jsonify(report)
@@ -371,11 +370,10 @@ def create_app(config: Config | None = None):
             def _reclaim(response):
                 # The staging copies exist to make re-rendering instant. Once the
                 # result is in the user's hands they are just occupying disk.
-                try:
+                # Reclaiming is best effort: never fail the download over it.
+                with contextlib.suppress(Exception):
                     session.downloaded = True
                     session.free_inputs()
-                except Exception:
-                    pass
                 return response
 
         response = send_file(
@@ -411,7 +409,12 @@ def create_app(config: Config | None = None):
 
     @app.errorhandler(404)
     def not_found(_exc):
-        return jsonify({"error": "no such session"}), 404
+        # Session routes are the only 404 the page can act on: it reads them as
+        # "this batch is gone" and resets itself. Any other missing path (a
+        # stale static asset, say) is just a missing path.
+        if request.path.startswith("/api/sessions/"):
+            return jsonify({"error": "no such session"}), 404
+        return jsonify({"error": "not found"}), 404
 
     @app.errorhandler(500)
     def server_error(exc):
@@ -426,11 +429,9 @@ def create_app(config: Config | None = None):
         """Stop the reaper's next sweep, clear sessions, and undo the temp redirect."""
         if tempfile.tempdir == str(spool):
             tempfile.tempdir = previous_tempdir
-        try:
+        with contextlib.suppress(Exception):
             for sid in list(store.sessions):
                 store.discard(sid)
-        except Exception:
-            pass
 
     app.dispose = dispose  # type: ignore[attr-defined]
     return app
@@ -441,21 +442,49 @@ def parse_args(argv=None):
         prog="amurcloak",
         description="Local face redaction for photos. Nothing leaves this machine.",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="bind address (default: localhost only)")
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="bind address (default: localhost only)"
+    )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
         help="port to bind (default: the first free port from 5000)",
     )
-    parser.add_argument("--tmp", default=str(DEFAULT_TMP), help="temp root for uploads and output")
-    parser.add_argument("--ttl", type=float, default=SESSION_TTL_SEC, help="idle seconds before a session is reaped")
-    parser.add_argument("--max-age", type=float, default=SESSION_MAX_AGE_SEC, help="hard session age limit in seconds")
-    parser.add_argument("--shred", action="store_true", help="zero-fill temp files before deleting (slower)")
-    parser.add_argument("--keep-inputs", action="store_true", help="do not free staged uploads after download")
-    parser.add_argument("--allow-download", action="store_true", help="permit a one-time model download if it is missing")
+    parser.add_argument(
+        "--tmp", default=str(DEFAULT_TMP), help="temp root for uploads and output"
+    )
+    parser.add_argument(
+        "--ttl",
+        type=float,
+        default=SESSION_TTL_SEC,
+        help="idle seconds before a session is reaped",
+    )
+    parser.add_argument(
+        "--max-age",
+        type=float,
+        default=SESSION_MAX_AGE_SEC,
+        help="hard session age limit in seconds",
+    )
+    parser.add_argument(
+        "--shred",
+        action="store_true",
+        help="zero-fill temp files before deleting (slower)",
+    )
+    parser.add_argument(
+        "--keep-inputs",
+        action="store_true",
+        help="do not free staged uploads after download",
+    )
+    parser.add_argument(
+        "--allow-download",
+        action="store_true",
+        help="permit a one-time model download if it is missing",
+    )
     parser.add_argument("--open", action="store_true", help="open the browser on start")
-    parser.add_argument("--no-open", action="store_true", help="do not open the browser")
+    parser.add_argument(
+        "--no-open", action="store_true", help="do not open the browser"
+    )
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args(argv)
 
@@ -463,7 +492,7 @@ def parse_args(argv=None):
 def run_app(args) -> int:
     try:
         model = ensure_model(allow_download=args.allow_download)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level start-up guard: report, do not traceback
         print(f"\n  Cannot start: {exc}\n", flush=True)
         return 1
 
@@ -483,16 +512,24 @@ def run_app(args) -> int:
     usage = store.usage()
 
     url = f"http://{'localhost' if config.host == '127.0.0.1' else config.host}:{config.port}"
-    print("\n  AmurCloak")
-    print("  " + "-" * 46)
-    print(f"  model      {model.name} ({model.stat().st_size / 1024:.0f}KB, checksum verified)")
-    print(f"  temp root  {config.tmp_root}")
-    print(f"  free disk  {usage['free_bytes'] / 1e9:.1f}GB")
-    print(f"  session    reaped after {int(config.ttl / 60)}min idle")
-    print("  network    none at runtime - no uploads, no telemetry")
-    print("  " + "-" * 46)
-    print(f"  open       {url}")
-    print("  stop       press Control-C\n")
+    banner = [
+        "",
+        "  AmurCloak",
+        "  " + "-" * 46,
+        f"  model      {model.name} ({model.stat().st_size / 1024:.0f}KB, checksum verified)",
+        f"  temp root  {config.tmp_root}",
+        f"  free disk  {usage['free_bytes'] / 1e9:.1f}GB",
+        f"  session    reaped after {int(config.ttl / 60)}min idle",
+        "  network    none at runtime - no uploads, no telemetry",
+        "  " + "-" * 46,
+        f"  open       {url}",
+        "  stop       press Control-C",
+        "",
+    ]
+    # Written in one flush. The server blocks on the next line forever, so
+    # anything left in a pipe's buffer would never be seen by someone who ran
+    # the command as ``amurcloak > log``.
+    print("\n".join(banner), flush=True)
 
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -503,10 +540,6 @@ def run_app(args) -> int:
         app.run(host=config.host, port=config.port, debug=True, threaded=True)
         return 0
 
-    # Bind directly rather than through app.run(). app.run() does *not* raise
-    # when the port is taken -- it prints its own message and calls sys.exit(),
-    # which leaves the caller nothing to catch. make_server raises OSError, so
-    # the port can be retried and the user never sees a failure.
     # Werkzeug does not raise when the port is taken. make_server prints its own
     # message and calls sys.exit(), which would kill the process with nothing
     # catchable (confirmed against werkzeug 3.1.9). Treat either shape as a

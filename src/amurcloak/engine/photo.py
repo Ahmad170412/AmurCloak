@@ -19,6 +19,7 @@ translated.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ try:  # iPhone photos are HEIC; without this most phone libraries simply cannot 
 
     pillow_heif.register_heif_opener()
     HEIF_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
+except Exception:  # noqa: BLE001  # pragma: no cover - optional dependency
     HEIF_AVAILABLE = False
 
 
@@ -57,12 +58,12 @@ class PhotoError(Exception):
     """A photo could not be read or written. Message is user-facing."""
 
 
-class PhotoTooLarge(PhotoError):
-    pass
+class PhotoTooLargeError(PhotoError):
+    """The image is larger than the decoding ceiling."""
 
 
-class UnsupportedFormat(PhotoError):
-    pass
+class UnsupportedFormatError(PhotoError):
+    """The file's format is not one we can read or write."""
 
 
 @dataclass
@@ -83,16 +84,15 @@ def output_extension(source_ext: str, has_alpha: bool) -> str:
     """Decide the output format.
 
     Alpha forces PNG (JPEG cannot carry it). PNG and TIFF stay lossless so we
-    never re-compress an already-lossless file. Everything else becomes JPEG,
-    which is what a redacted photo is almost always wanted as.
+    never re-compress an already-lossless file. Everything else becomes JPEG -
+    HEIC included, because JPEG opens everywhere and HEIC output surprises
+    people who expected a file they could attach to anything.
     """
     source_ext = source_ext.lower()
     if has_alpha:
         return ".png"
     if source_ext in _LOSSLESS_PRESERVE:
         return source_ext
-    if source_ext == ".heic" or source_ext == ".heif":
-        return ".jpg"  # universally openable; HEIC output surprises people
     return ".jpg"
 
 
@@ -121,12 +121,12 @@ def load_photo(path: str | Path) -> Photo:
     path = Path(path)
     ext = path.suffix.lower()
     if ext not in SUPPORTED_IN:
-        raise UnsupportedFormat(f"{ext or 'unknown'} files are not supported")
+        raise UnsupportedFormatError(f"{ext or 'unknown'} files are not supported")
 
     try:
         with Image.open(path) as im:
             if im.width * im.height > MAX_PIXELS:
-                raise PhotoTooLarge(
+                raise PhotoTooLargeError(
                     f"{im.width}x{im.height} exceeds the {MAX_PIXELS // 1_000_000}MP limit"
                 )
 
@@ -136,31 +136,35 @@ def load_photo(path: str | Path) -> Photo:
             orientation = 1
             try:
                 orientation = im.getexif().get(EXIF_ORIENTATION, 1) or 1
-            except Exception:
+            except Exception:  # noqa: BLE001 - a broken EXIF block just means "do not rotate"
                 orientation = 1
-            if orientation != 1:
-                im = ImageOps.exif_transpose(im)
 
-            has_alpha = im.mode in ("RGBA", "LA", "PA") or (
-                im.mode == "P" and "transparency" in im.info
+            # exif_transpose hands back a new image; the original stays owned by
+            # the ``with`` above and is closed when that block exits.
+            upright = ImageOps.exif_transpose(im) if orientation != 1 else im
+
+            has_alpha = upright.mode in ("RGBA", "LA", "PA") or (
+                upright.mode == "P" and "transparency" in upright.info
             )
             alpha = None
             if has_alpha:
-                rgba = im.convert("RGBA")
+                rgba = upright.convert("RGBA")
                 alpha = np.array(rgba.getchannel("A"))
                 rgb = np.asarray(rgba.convert("RGB"))
             else:
-                rgb = np.asarray(im.convert("RGB"))
+                rgb = np.asarray(upright.convert("RGB"))
 
             bgr = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR)
 
     except PhotoError:
         raise
     except Image.DecompressionBombError as exc:
-        raise PhotoTooLarge(str(exc)) from exc
+        raise PhotoTooLargeError(str(exc)) from exc
     except UnidentifiedImageError as exc:
-        raise UnsupportedFormat(f"could not decode {path.name}") from exc
+        raise UnsupportedFormatError(f"could not decode {path.name}") from exc
     except Exception as exc:
+        # Anything the decoder can throw beyond the two cases above becomes a
+        # PhotoError, so a caller only ever has one failure type to handle.
         raise PhotoError(f"could not read {path.name}: {exc}") from exc
 
     h, w = bgr.shape[:2]
@@ -220,10 +224,11 @@ def save_photo(
         elif ext in (".tif", ".tiff"):
             image.save(path, format="TIFF", compression="tiff_deflate", icc_profile=profile)
         else:
-            raise UnsupportedFormat(f"cannot write {ext} output")
+            raise UnsupportedFormatError(f"cannot write {ext} output")
     except PhotoError:
         raise
     except Exception as exc:
+        # As above: any encoder failure is reported as a PhotoError.
         raise PhotoError(f"could not write {path.name}: {exc}") from exc
 
 
@@ -242,28 +247,24 @@ def probe_metadata(path: str | Path) -> dict:
         "datetime": None,
         "icc": False,
     }
-    try:
-        with Image.open(Path(path)) as im:
-            info["has_xmp"] = "xmp" in im.info
-            info["has_iptc"] = "iptc" in im.info
-            info["icc"] = bool(im.info.get("icc_profile"))
-            try:
-                exif = im.getexif()
-            except Exception:
-                exif = None
-            if exif:
-                info["has_exif"] = len(exif) > 0
-                make = exif.get(EXIF_MAKE)
-                model = exif.get(EXIF_MODEL)
-                if make or model:
-                    info["camera"] = " ".join(
-                        str(v).strip() for v in (make, model) if v
-                    )[:80]
-                dt = exif.get(EXIF_DATETIME)
-                if dt:
-                    info["datetime"] = str(dt)[:40]
-                gps = exif.get_ifd(EXIF_GPS_IFD)
-                info["has_gps"] = bool(gps)
-    except Exception:
-        pass
+    # Best effort: any failure at all just means "no metadata to report".
+    with contextlib.suppress(Exception), Image.open(Path(path)) as im:
+        info["has_xmp"] = "xmp" in im.info
+        info["has_iptc"] = "iptc" in im.info
+        info["icc"] = bool(im.info.get("icc_profile"))
+        try:
+            exif = im.getexif()
+        except Exception:  # noqa: BLE001 - a malformed EXIF block means "nothing to report"
+            exif = None
+        if exif:
+            info["has_exif"] = len(exif) > 0
+            make = exif.get(EXIF_MAKE)
+            model = exif.get(EXIF_MODEL)
+            if make or model:
+                info["camera"] = " ".join(str(v).strip() for v in (make, model) if v)[:80]
+            dt = exif.get(EXIF_DATETIME)
+            if dt:
+                info["datetime"] = str(dt)[:40]
+            gps = exif.get_ifd(EXIF_GPS_IFD)
+            info["has_gps"] = bool(gps)
     return info

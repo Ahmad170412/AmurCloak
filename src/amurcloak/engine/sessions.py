@@ -20,6 +20,7 @@ throughput to win by running two, since detection already saturates a core.
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import shutil
 import tempfile
@@ -30,8 +31,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import photo as photo_io
-from . import redact
+from . import photo as photo_io, redact
 from .detector import Face, FaceDetector
 from .presets import Settings, build as build_settings
 
@@ -97,24 +97,22 @@ def ensure_space(paths: list[Path], incoming_bytes: int) -> None:
 
 def _shred_file(path: Path) -> None:
     """Best-effort overwrite before unlink. Off by default: it costs a full write pass."""
-    try:
+    with contextlib.suppress(OSError):
         size = path.stat().st_size
         if size == 0:
             path.unlink()
             return
-        with open(path, "r+b", buffering=0) as handle:
+        with path.open("r+b", buffering=0) as handle:
             remaining = size
             chunk = b"\x00" * (1024 * 1024)
             while remaining > 0:
                 n = min(remaining, len(chunk))
                 handle.write(chunk[:n])
                 remaining -= n
-    except OSError:
-        pass
-    try:
+    # Unlink even if the overwrite failed: leaving the plaintext behind would
+    # defeat the point of having asked for a shred.
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass
 
 
 def purge_tree(root: Path, shred: bool = False) -> None:
@@ -253,7 +251,7 @@ class Session:
                 item.height = decoded.height
             return faces
 
-    def forget_detections(self, detector: FaceDetector | None = None) -> None:
+    def forget_detections(self) -> None:
         with self.lock:
             self._detections.clear()
 
@@ -326,10 +324,8 @@ class Session:
             total = 0
             for p in path.rglob("*"):
                 if p.is_file():
-                    try:
+                    with contextlib.suppress(OSError):
                         total += p.stat().st_size
-                    except OSError:
-                        pass
             return total
 
         with self.lock:
@@ -415,11 +411,9 @@ class SessionStore:
                 purge_tree(child, shred=False)
                 removed += 1
             elif child.is_file():
-                try:
+                with contextlib.suppress(OSError):
                     child.unlink()
                     removed += 1
-                except OSError:
-                    pass
         return removed
 
     def create(self, settings: Settings | None = None) -> Session:
@@ -458,10 +452,10 @@ class SessionStore:
 
         total = 0
         for session in sessions:
-            try:
+            # The reaper can discard a session between the snapshot above and
+            # this call. That race is expected, so accounting just skips it.
+            with contextlib.suppress(Exception):
                 total += session.disk_usage()["total"]
-            except Exception:
-                pass
 
         # Include anything on disk not tracked as a live session (should be zero
         # outside of an in-flight upload).
@@ -471,10 +465,8 @@ class SessionStore:
                 if child.is_dir():
                     for p in child.rglob("*"):
                         if p.is_file():
-                            try:
+                            with contextlib.suppress(OSError):
                                 on_disk += p.stat().st_size
-                            except OSError:
-                                pass
 
         return {
             "sessions": len(sessions),
@@ -489,10 +481,9 @@ class SessionStore:
         def loop() -> None:
             while True:
                 time.sleep(interval)
-                try:
+                # A sweep that throws must not kill the loop; the next one retries.
+                with contextlib.suppress(Exception):
                     self.reap()
-                except Exception:
-                    pass
 
         thread = threading.Thread(target=loop, name="amurcloak-reaper", daemon=True)
         thread.start()
@@ -648,8 +639,16 @@ class Renderer:
                     # Exactly one success: hand back the image itself, not a
                     # zip wrapping a single file.
                     single = done[0]
-                    session.result_path = session.out_dir / (single.out_name or single.name)
-                    session.result_name = single.out_name or single.name
+                    name = single.out_name or single.name
+                    if archived and zip_tmp.exists():
+                        # Every success was spooled into the zip and unlinked
+                        # from out_dir as it went, so this last survivor has to
+                        # come back out of the spool. Without this the batch
+                        # would report "ready" with no file behind it.
+                        with zipfile.ZipFile(zip_tmp) as spool:
+                            spool.extract(name, session.out_dir)
+                    session.result_path = session.out_dir / name
+                    session.result_name = name
                     session.result_size = (
                         session.result_path.stat().st_size
                         if session.result_path.exists()
@@ -663,10 +662,8 @@ class Renderer:
 
         finally:
             if zf is not None:
-                try:
+                with contextlib.suppress(Exception):
                     zf.close()
-                except Exception:
-                    pass
             if zip_tmp.exists():
                 zip_tmp.unlink(missing_ok=True)
             # A failed render should not leave half a batch on disk.

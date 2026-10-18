@@ -138,9 +138,10 @@
       button.setAttribute("aria-pressed", "false");
       button.addEventListener("click", () => {
         state.settings.preset = preset.key;
-        syncControls();
-        // Adopt the preset's own idea of a sensible coverage.
+        // Adopt the preset's own idea of a sensible coverage *before* the
+        // repaint, so the slider track and its readout agree with the value.
         setMarginSlider(preset.margin);
+        syncControls();
         pushSettings();
       });
       el.presetOptions.appendChild(button);
@@ -189,10 +190,16 @@
 
   function pushSettings() {
     if (!state.sid) return;
+    // Remember which batch this change belongs to. If the batch is swapped
+    // before the debounce fires, or while the POST is in flight, the reply
+    // describes a session that is no longer on screen and must be dropped -
+    // otherwise a stale 404 would tear down the *new* batch.
+    const sid = state.sid;
     clearTimeout(state.settingsTimer);
     state.settingsTimer = setTimeout(async () => {
+      if (sid !== state.sid) return;
       try {
-        await api(`/api/sessions/${state.sid}/settings`, {
+        await api(`/api/sessions/${sid}/settings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -202,8 +209,9 @@
             strength: state.settings.strength,
           }),
         });
-        refreshPreview();
+        if (sid === state.sid) refreshPreview();
       } catch (error) {
+        if (sid !== state.sid) return;
         if (isSessionGone(error)) {
           sessionLost();
           return;
@@ -472,12 +480,15 @@
 
     if (snapshot.state === "ready" && snapshot.result.ready) {
       const count = snapshot.items.filter((i) => i.status === "done").length;
+      const freed = Boolean(snapshot.disk && snapshot.disk.inputs_freed);
       el.downloadBtn.hidden = false;
       el.downloadBtn.textContent = `Download ${count} ${plural(count, "photo", "photos")}`;
       el.renderBtn.textContent = "Redact again";
-      el.renderBtn.disabled = state.busy;
+      // Re-rendering reads the staged copies. Once those have been freed there
+      // is nothing left to read, and the button would only produce an error.
+      el.renderBtn.disabled = state.busy || freed;
       el.actionNote.textContent = snapshot.downloaded
-        ? "Staged copies were freed to reclaim disk. The redacted files are still here."
+        ? "Staged copies were freed to reclaim space. Drop the photos again to redact them differently."
         : `Output is ${formatBytes(snapshot.result.size)}. Staged copies are freed once you download.`;
       return;
     }
@@ -607,6 +618,11 @@
     el.resetBtn.hidden = true;
     el.metadataFlag.hidden = true;
     el.previewImg.removeAttribute("src");
+    // Drop the previous batch's caption and note too: the viewer is hidden now,
+    // but it becomes visible again the instant the new batch lands, and a note
+    // describing the *old* photos under the new file's name is a lie.
+    clearViewerCaption();
+    setNote("");
   }
 
   async function upload(files) {
@@ -624,6 +640,7 @@
     state.sid = null;
     state.snapshot = null;
     state.index = 0;
+    state.previewToken += 1; // any preview still in flight belongs to the old batch
     state.pending = list.map((file) => ({
       name: file.name || "photo",
       size: file.size,
@@ -765,9 +782,11 @@
     state.busy = false;
     state.uploading = false;
     state.pending = [];
+    state.previewToken += 1; // drop any preview still in flight for the old batch
 
     hideStaging();
     el.previewImg.removeAttribute("src");
+    clearViewerCaption();
     el.dropzone.hidden = false;
     el.viewer.hidden = true;
     el.resetBtn.hidden = true;

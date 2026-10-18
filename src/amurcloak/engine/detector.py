@@ -14,6 +14,7 @@ resolution for those regions at a cost of a few milliseconds per crop.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ MAX_GRID = 4  # 4x4 = 16 crops, plus the full frame; caps work on huge panoramas
 # local user. Serialising also stops concurrent previews thrashing the CPU.
 _CACHE_LOCK = threading.Lock()
 _INFER_LOCK = threading.Lock()
-_NET_CACHE: dict[tuple, "cv2.FaceDetectorYN"] = {}
+_NET_CACHE: dict[tuple, cv2.FaceDetectorYN] = {}
 
 
 @dataclass
@@ -112,10 +113,8 @@ def model_path(root: str | Path | None = None) -> Path:
 
 
 def _sha256(path: Path) -> str:
-    import hashlib
-
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -153,7 +152,7 @@ def ensure_model(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".part")
-    urllib.request.urlretrieve(MODEL_URL, temporary)  # noqa: S310 - fixed https URL
+    urllib.request.urlretrieve(MODEL_URL, temporary)  # fixed https URL, never user input
     if _sha256(temporary) != MODEL_SHA256:
         temporary.unlink(missing_ok=True)
         raise RuntimeError("downloaded model failed checksum; refusing to use it")
@@ -190,7 +189,7 @@ class FaceDetector:
 
     # -- network cache ----------------------------------------------------
 
-    def _net(self) -> "cv2.FaceDetectorYN":
+    def _net(self) -> cv2.FaceDetectorYN:
         key = (str(self.model), round(self.score, 3), round(self.nms, 3), self.top_k)
         with _CACHE_LOCK:
             net = _NET_CACHE.get(key)
@@ -224,7 +223,7 @@ class FaceDetector:
         if long_edge <= self.detect_edge:
             return [full]  # already at native resolution, nothing to gain
 
-        grid = int(math.ceil(long_edge / float(self.detect_edge)))
+        grid = math.ceil(long_edge / float(self.detect_edge))
         grid = max(2, min(MAX_GRID, grid))
 
         def cuts(total: int) -> list[tuple[int, int]]:
@@ -232,8 +231,8 @@ class FaceDetector:
             pad = stride * TILE_OVERLAP / 2.0
             spans = []
             for i in range(grid):
-                start = max(0, int(round(i * stride - pad)))
-                end = min(total, int(round((i + 1) * stride + pad)))
+                start = max(0, round(i * stride - pad))
+                end = min(total, round((i + 1) * stride + pad))
                 if end - start >= MIN_INFER_DIM:
                     spans.append((start, end))
             return spans
@@ -262,8 +261,8 @@ class FaceDetector:
         long_edge = max(vh, vw)
         scale = min(1.0, self.detect_edge / long_edge)
         if scale < 1.0:
-            tw = max(MIN_INFER_DIM, int(round(vw * scale)))
-            th = max(MIN_INFER_DIM, int(round(vh * scale)))
+            tw = max(MIN_INFER_DIM, round(vw * scale))
+            th = max(MIN_INFER_DIM, round(vh * scale))
             net_in = cv2.resize(view, (tw, th), interpolation=cv2.INTER_AREA)
         else:
             tw, th = vw, vh
@@ -327,7 +326,7 @@ class FaceDetector:
     # -- public -----------------------------------------------------------
 
     def detect(self, bgr: np.ndarray) -> list[Face]:
-        """Return faces in full-image pixel coordinates, best first."""
+        """Faces in full-image pixel coordinates, left to right, top to bottom."""
         if bgr is None or bgr.size == 0:
             return []
         h, w = bgr.shape[:2]
