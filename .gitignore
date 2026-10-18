@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime scratch space: uploads, renders, and the multipart spool.
+# Everything here is transient by design and is reaped automatically.
+.tmp/
+
+# Rebuilt on demand by the fixture builders in tests/test_engine.py,
+# so the generated fixtures are not worth tracking.
+tests/fixtures/gen/
+
+# macOS
+.DS_Store

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>TigerBlur</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_v) }}">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23F7F9FA'/><g fill='%23C97A2B' transform='rotate(-12 16 16)'><rect x='7' y='8' width='3.2' height='16' rx='1.6'/><rect x='13' y='5' width='3.2' height='22' rx='1.6' opacity='.7'/><rect x='19' y='10' width='3.2' height='12' rx='1.6' opacity='.45'/></g></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <g fill="currentColor" transform="rotate(-12 16 16)">
+        <rect x="7" y="8" width="3.2" height="16" rx="1.6"/>
+        <rect x="13" y="5" width="3.2" height="22" rx="1.6" opacity=".7"/>
+        <rect x="19" y="10" width="3.2" height="12" rx="1.6" opacity=".45"/>
+      </g>
+    </svg>
+    <span class="wordmark">TigerBlur</span>
+  </div>
+</header>
+
+<main class="workspace" id="workspace">
+
+  <!-- ── the photos: what is staged, how hard to look, and the action ── -->
+  <aside class="rail rail-photos" aria-label="Photos">
+
+    <div class="rail-head">
+      <h2>Photos</h2>
+    </div>
+
+    <div class="rail-scroll">
+      <ol class="file-list" id="file-list"></ol>
+      <p class="rail-note" id="files-note">Nothing staged yet.</p>
+    </div>
+
+    <div class="rail-foot">
+
+      <fieldset class="group" id="group-scan">
+        <legend>Faces to find</legend>
+        <div class="segmented segmented-wide" id="preset-options" role="group" aria-label="How hard to look for faces"></div>
+      </fieldset>
+
+      <div class="metadata-flag" id="metadata-flag" hidden></div>
+
+      <div class="actions" id="actions">
+        <button type="button" class="btn btn-primary btn-wide" id="render-btn" disabled>Redact photos</button>
+        <button type="button" class="btn btn-primary btn-wide" id="download-btn" hidden>Download</button>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+          <p class="progress-text" id="progress-text" aria-live="polite"></p>
+        </div>
+        <p class="action-note" id="action-note"></p>
+        <button type="button" class="btn btn-quiet" id="reset-btn" hidden>Remove these photos</button>
+      </div>
+
+    </div>
+  </aside>
+
+  <!-- ── the stage ── -->
+  <section class="stage" aria-label="Preview">
+
+    <div class="dropzone" id="dropzone">
+      <div class="dropzone-stripes" aria-hidden="true"></div>
+      <div class="dropzone-inner">
+        <h1>Redact faces before you share.</h1>
+        <p class="lede">
+          Drop photos here, or paste a screenshot. Faces are found and covered
+          on this machine. There is no server to upload to.
+        </p>
+        <div class="dropzone-actions">
+          <button type="button" class="btn btn-primary" id="pick-files">Choose photos</button>
+          <span class="dropzone-hint">or drop them anywhere on this page</span>
+        </div>
+        <p class="formats" id="formats-line"></p>
+      </div>
+    </div>
+
+    <div class="staging" id="staging" hidden>
+      <div class="staging-card">
+        <span class="spinner" aria-hidden="true"></span>
+        <h2 class="staging-title" id="staging-title">Staging photos</h2>
+        <div class="staging-track" id="staging-track">
+          <div class="staging-fill" id="staging-fill"></div>
+        </div>
+        <p class="staging-note" id="staging-note" aria-live="polite"></p>
+        <button type="button" class="btn btn-quiet" id="staging-cancel" hidden>Cancel</button>
+      </div>
+    </div>
+
+    <div class="viewer" id="viewer" hidden>
+      <div class="viewer-bar">
+        <div class="viewer-meta">
+          <span class="viewer-name" id="viewer-name"></span>
+          <span class="viewer-index tabnum" id="viewer-index"></span>
+        </div>
+        <div class="segmented" role="group" aria-label="Preview layer">
+          <button type="button" data-view="audit" class="seg is-on">Audit map</button>
+          <button type="button" data-view="result" class="seg">Result</button>
+        </div>
+      </div>
+      <div class="viewer-canvas" id="viewer-canvas">
+        <img id="preview-img" alt="Preview of the redaction for the selected photo">
+        <div class="viewer-loading" id="viewer-loading" hidden></div>
+      </div>
+      <p class="viewer-note" id="viewer-note" aria-live="polite"></p>
+    </div>
+
+  </section>
+
+  <!-- ── the mask: how the cover looks, and the disk it costs ── -->
+  <aside class="rail rail-mask" aria-label="Redaction">
+
+    <div class="rail-head">
+      <h2>Redaction</h2>
+    </div>
+
+    <div class="rail-scroll">
+
+      <fieldset class="group" id="group-mode">
+        <legend>Cover</legend>
+        <div class="options" id="mode-options"></div>
+        <p class="slider-note" id="mode-note"></p>
+      </fieldset>
+
+      <fieldset class="group" id="group-tune">
+        <legend>Adjust</legend>
+
+        <div class="slider-row">
+          <label for="margin">Coverage</label>
+          <output class="tabnum" id="margin-out"></output>
+          <input type="range" id="margin" min="0" max="60" value="14" step="1">
+          <p class="slider-note">How far the cover reaches past the face. Wider catches hair and jaw.</p>
+        </div>
+
+        <div class="slider-row" id="strength-row">
+          <label for="strength">Strength</label>
+          <output class="tabnum" id="strength-out"></output>
+          <input type="range" id="strength" min="0" max="100" value="70" step="5">
+          <p class="slider-note" id="strength-note"></p>
+        </div>
+      </fieldset>
+
+    </div>
+
+  </aside>
+
+</main>
+
+<div class="dropcatcher" id="dropcatcher" hidden>
+  <p>Release to redact these photos</p>
+</div>
+
+<input type="file" id="file-input" accept="image/*,.heic,.heif" multiple hidden>
+
+<script src="{{ url_for('static', filename='app.js', v=asset_v) }}"></script>
+</body>
+</html>

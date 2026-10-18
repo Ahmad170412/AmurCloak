@@ -1,0 +1,7 @@
+# TigerBlur runtime dependencies. Deliberately tiny - no torch, no onnxruntime,
+# no ffmpeg binary. Everything here is a prebuilt arm64 wheel.
+opencv-python-headless>=4.10
+numpy>=1.26
+flask>=3.0
+pillow>=10.0
+pillow-heif>=0.16
