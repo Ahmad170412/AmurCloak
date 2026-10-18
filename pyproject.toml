@@ -4,11 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amurcloak"
-version = "1.0.0"
+version = "0.9.0"
 description = "Local face redaction for photos. Nothing leaves this machine."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Ahmad170412" }]
 requires-python = ">=3.11"
 keywords = ["privacy", "redaction", "face-detection", "photos", "heic", "offline"]
 classifiers = [
@@ -35,6 +36,12 @@ dependencies = [
     "pillow>=10.0",
     "pillow-heif>=0.16",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Ahmad170412/AmurCloak"
+Repository = "https://github.com/Ahmad170412/AmurCloak"
+Issues = "https://github.com/Ahmad170412/AmurCloak/issues"
+Changelog = "https://github.com/Ahmad170412/AmurCloak/releases"
 
 [project.scripts]
 amurcloak = "amurcloak.cli:main"

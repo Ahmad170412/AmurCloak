@@ -8,4 +8,4 @@ The only network traffic AmurCloak can produce is the request your own browser
 makes to 127.0.0.1 to display the interface.
 """
 
-__version__ = "1.0.0"
+__version__ = "0.9.0"

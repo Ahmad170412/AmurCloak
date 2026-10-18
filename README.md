@@ -11,7 +11,7 @@ No uploads, no accounts, no telemetry. Drop photos in, check the map, download r
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-24%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-26%20passing-3f6b52)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
@@ -64,13 +64,13 @@ The **audit map** shows you what was found before you commit to anything. If a f
 **One paste.** This installs [uv](https://docs.astral.sh/uv/) — which brings its own Python — and then AmurCloak itself, straight from a release. The `export` is there so it works in the terminal you already have open, with no restart:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-0.9.0-py3-none-any.whl
 ```
 
 Windows, in PowerShell — same idea:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-0.9.0-py3-none-any.whl
 ```
 
 **Then, forever after:**
@@ -167,7 +167,7 @@ The Quick Start above is the whole thing. Two other routes, if you want them:
 ```bash
 git clone <this-repository> AmurCloak
 cd AmurCloak && uv tool install .                       # from a checkout
-uv tool install dist/amurcloak-1.0.0-py3-none-any.whl   # from a wheel you built
+uv tool install dist/amurcloak-0.9.0-py3-none-any.whl   # from a wheel you built
 ```
 
 Upgrading and removing are each one command:
@@ -269,8 +269,8 @@ Detection is tens of milliseconds on a phone-sized photo, and a few hundred mill
 Two suites, no test framework, no fixtures to download:
 
 ```bash
-uv run python tests/test_engine.py   # 12/12 — detection, masking, colour, metadata, formats
-uv run python tests/test_api.py      # 11/11 — upload, tune, preview, render, download, disk
+uv run python tests/test_engine.py   # 13/13 — detection, masking, colour, metadata, formats
+uv run python tests/test_api.py      # 13/13 — upload, tune, preview, render, download, disk
 ```
 
 The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks.
@@ -284,8 +284,10 @@ Notable coverage:
 - Outputs carry no EXIF, GPS or camera metadata.
 - Changing settings invalidates a stale result.
 - The temp spool survives startup and a real multi-megabyte upload, and the orphan purge spares reserved folders.
+- A batch that loses all but one photo at render still hands that survivor back, as a plain image rather than a zip.
+- A non-finite slider value degrades to the default instead of reaching the mask geometry.
 
-The last two exist because both were real bugs — an upload that silently failed with a 500, and a purge that deleted the directory Werkzeug spools uploads into.
+Several of these exist because they were real bugs: an upload that silently failed with a 500, a purge that deleted the directory Werkzeug spools uploads into, a batch that reported "ready" with no file behind it, and a `"nan"` margin that could have reached the ellipse maths.
 
 ---
 
