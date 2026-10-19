@@ -79,6 +79,16 @@ class Face:
             "score": round(self.score, 3),
         }
 
+    def key(self) -> tuple[int, int, int, int]:
+        """Identity for picking a person, derived from the box itself.
+
+        Not a list index: the order detections come back in is an implementation
+        detail, and a stale index would silently un-redact the wrong person. The
+        rounded box is stable for as long as the detection cache holds the same
+        detection, which is exactly the window in which the user is clicking.
+        """
+        return (round(self.x), round(self.y), round(self.w), round(self.h))
+
 
 def _iou(a: Face, b: Face) -> float:
     ax0, ay0, ax1, ay1 = a.x, a.y, a.x + a.w, a.y + a.h

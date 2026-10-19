@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Redaction modes
@@ -123,6 +124,26 @@ DEFAULT_QUALITY = 95
 MIN_FACE_FLOOR = 12  # never let a preset request faces below this
 DETECT_EDGE_CAP = 2048  # guard against absurd inference sizes
 
+# ---------------------------------------------------------------------------
+# Metadata policy
+# ---------------------------------------------------------------------------
+# "strip" deletes everything, which is what this tool has always done and what
+# it still does by default. "spoof" deletes everything and then writes a
+# deliberately false EXIF block in its place.
+#
+# Off by default on purpose. Deleting a true timestamp and replacing it with a
+# false one are different claims, and the second is the wrong thing to do by
+# accident to somebody who later needs the real one.
+
+METADATA_POLICIES = ("strip", "spoof")
+DEFAULT_METADATA = "strip"
+
+# 06:00 on 5 May 1453 - the fall of Constantinople. Format-valid, and a date no
+# camera could ever have produced, so anyone who reads it knows it is fake. It is
+# only a default: the field takes any date, including a recent one when blending
+# in matters more than announcing itself.
+DEFAULT_SPOOF_WHEN = "1453-05-05T06:00"
+
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -151,6 +172,8 @@ class Settings:
     strength: float = DEFAULT_STRENGTH
     strip_exif: bool = True
     quality: int = DEFAULT_QUALITY
+    metadata: str = DEFAULT_METADATA
+    spoof_when: str = DEFAULT_SPOOF_WHEN
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -169,6 +192,8 @@ def build(
     tiles: bool | None = None,
     strip_exif: bool | None = None,
     quality: int | None = None,
+    metadata: str | None = None,
+    spoof_when: str | None = None,
 ) -> Settings:
     """Resolve a preset into a Settings object, applying explicit overrides."""
     p = PRESETS.get(preset, PRESETS[DEFAULT_PRESET])
@@ -195,8 +220,31 @@ def build(
         settings.strip_exif = bool(strip_exif)
     if quality is not None:
         settings.quality = int(clamp(int(quality), 60, 100))
+    if metadata in METADATA_POLICIES:
+        settings.metadata = metadata
+    when = normalize_when(spoof_when)
+    if when is not None:
+        settings.spoof_when = when
 
     return settings
+
+
+def normalize_when(raw: object) -> str | None:
+    """Turn a date-time input into ``YYYY-MM-DDTHH:MM``, or ``None`` if it is junk.
+
+    The browser's ``datetime-local`` control already guarantees the shape, so a
+    value that arrives malformed came from the JSON API. It is rejected rather
+    than guessed at, and the caller keeps the default.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if not 1 <= moment.year <= 9999:
+        return None
+    return moment.strftime("%Y-%m-%dT%H:%M")
 
 
 def from_payload(payload: dict) -> Settings:
@@ -238,6 +286,10 @@ def from_payload(payload: dict) -> Settings:
     if mode not in MODES:
         mode = DEFAULT_MODE
 
+    metadata = payload.get("metadata")
+    if metadata not in METADATA_POLICIES:
+        metadata = None
+
     return build(
         preset,
         mode=mode,
@@ -246,6 +298,8 @@ def from_payload(payload: dict) -> Settings:
         tiles=_flag("tiles"),
         strip_exif=_flag("strip_exif"),
         quality=_num("quality"),
+        metadata=metadata,
+        spoof_when=payload.get("spoof_when"),
     )
 
 
@@ -271,5 +325,14 @@ def catalog() -> dict:
             "preset": DEFAULT_PRESET,
             "strength": DEFAULT_STRENGTH,
             "strip_exif": True,
+            "metadata": DEFAULT_METADATA,
+            "spoof_when": DEFAULT_SPOOF_WHEN,
+        },
+        # The forged identity is fixed, not configurable: a made-up camera is
+        # harmless, but a made-up location that the user could type is a location
+        # that could name somebody's house. See engine/photo.py.
+        "metadata": {
+            "policies": list(METADATA_POLICIES),
+            "default_when": DEFAULT_SPOOF_WHEN,
         },
     }

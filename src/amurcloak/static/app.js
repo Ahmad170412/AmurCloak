@@ -13,6 +13,10 @@
     canvas: $("#viewer-canvas"),
     previewImg: $("#preview-img"),
     viewerLoading: $("#viewer-loading"),
+    faceLayer: $("#face-layer"),
+    viewerPick: $("#viewer-pick"),
+    pickHint: $("#pick-hint"),
+    coverAll: $("#cover-all"),
     viewerName: $("#viewer-name"),
     viewerIndex: $("#viewer-index"),
     viewerNote: $("#viewer-note"),
@@ -27,6 +31,10 @@
     strengthOut: $("#strength-out"),
     strengthRow: $("#strength-row"),
     strengthNote: $("#strength-note"),
+    metadataOptions: $("#metadata-options"),
+    whenRow: $("#when-row"),
+    spoofWhen: $("#spoof-when"),
+    metadataNote: $("#metadata-note"),
     metadataFlag: $("#metadata-flag"),
     renderBtn: $("#render-btn"),
     downloadBtn: $("#download-btn"),
@@ -45,7 +53,7 @@
     stagingFill: $("#staging-fill"),
     stagingNote: $("#staging-note"),
     stagingCancel: $("#staging-cancel"),
-    segs: document.querySelectorAll(".seg"),
+    segs: document.querySelectorAll(".seg[data-view]"),
   };
 
   const state = {
@@ -54,7 +62,15 @@
     snapshot: null,
     index: 0,
     view: "audit",
-    settings: { mode: "black", preset: "balanced", margin: 0.14, strength: 0.7 },
+    settings: {
+      mode: "black",
+      preset: "balanced",
+      margin: 0.14,
+      strength: 0.7,
+      metadata: "strip",
+      spoof_when: "",
+    },
+    faces: [], // the last preview's detections, for the click targets
     previewToken: 0,
     busy: false,
     uploading: false,
@@ -148,6 +164,38 @@
     }
   }
 
+  const METADATA_LABELS = [
+    ["strip", "Removed"],
+    ["spoof", "Forged"],
+  ];
+
+  /* What each policy means, in the user's terms rather than the spec's. */
+  const METADATA_COPY = {
+    strip:
+      "Everything goes: EXIF, GPS, camera and timestamps. The copy says nothing about where or when it was taken.",
+    spoof:
+      "Everything goes, then a false block is written in its place: the date below, a made-up camera, and a location fixed to the emptiest point in the Pacific - far enough from any land that it can never name a home.",
+  };
+
+  function renderMetadataOptions() {
+    el.metadataOptions.innerHTML = "";
+    for (const [key, label] of METADATA_LABELS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "seg";
+      button.dataset.metadata = key;
+      button.textContent = label;
+      button.title = METADATA_COPY[key];
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        state.settings.metadata = key;
+        syncControls();
+        pushSettings();
+      });
+      el.metadataOptions.appendChild(button);
+    }
+  }
+
   function setMarginSlider(margin) {
     state.settings.margin = margin;
     el.margin.value = String(Math.round(margin * 100));
@@ -186,6 +234,16 @@
 
     const mode = state.config.modes.find((m) => m.key === state.settings.mode);
     el.modeNote.textContent = mode ? mode.detail : "";
+
+    for (const button of el.metadataOptions.children) {
+      const on = button.dataset.metadata === state.settings.metadata;
+      button.classList.toggle("is-on", on);
+      button.setAttribute("aria-pressed", String(on));
+    }
+    const forging = state.settings.metadata === "spoof";
+    el.whenRow.hidden = !forging;
+    if (state.settings.spoof_when) el.spoofWhen.value = state.settings.spoof_when;
+    el.metadataNote.textContent = METADATA_COPY[state.settings.metadata] || "";
   }
 
   function pushSettings() {
@@ -207,9 +265,17 @@
             preset: state.settings.preset,
             margin: state.settings.margin,
             strength: state.settings.strength,
+            metadata: state.settings.metadata,
+            spoof_when: state.settings.spoof_when,
           }),
         });
-        if (sid === state.sid) refreshPreview();
+        if (sid === state.sid) {
+          // The "Heads up" note is the one piece of copy that reads the photos
+          // *and* the policy, so switching between Removed and Forged has to
+          // redraw it now. The next snapshot may be minutes away.
+          renderMetadataFlag();
+          refreshPreview();
+        }
       } catch (error) {
         if (sid !== state.sid) return;
         if (isSessionGone(error)) {
@@ -276,6 +342,7 @@
       if (token !== state.previewToken) return; // a newer request already won
       el.previewImg.src = `data:image/jpeg;base64,${payload.image}`;
       el.viewerNote.textContent = payload.note;
+      renderFaces(payload);
 
       // The rail learns the face count for whatever was just checked, so it can
       // report real numbers without scanning every photo up front.
@@ -296,14 +363,155 @@
       // No image, so no caption either: a named empty frame reads as a bug.
       el.previewImg.removeAttribute("src");
       clearViewerCaption();
+      hideFaces();
       setNote(error.message);
     } finally {
       if (token === state.previewToken) el.viewerLoading.hidden = true;
     }
   }
 
-  async function selectIndex(index) {
-    if (!state.snapshot || !state.snapshot.items.length) return;
+  /* ── picking people ──────────────────────────────────────────── */
+  //
+  // Everything starts covered. Clicking a covered person leaves them visible;
+  // clicking them again puts the cover back. The click targets are the ellipses
+  // the server actually painted, published as percentages of the photo, so the
+  // shape you click is the shape that was masked - never an approximation.
+
+  /** Line the face layer up with the rendered image, whatever its size. */
+  function syncFaceLayer() {
+    const img = el.previewImg;
+    if (!img.getAttribute("src") || !img.naturalWidth || el.viewer.hidden) {
+      el.faceLayer.hidden = true;
+      return;
+    }
+    // offsetLeft/Top are measured from the canvas's padding box, which is also
+    // the containing block for an absolutely positioned child, so this lands on
+    // the image without having to reason about borders or letterboxing.
+    el.faceLayer.style.left = `${img.offsetLeft}px`;
+    el.faceLayer.style.top = `${img.offsetTop}px`;
+    el.faceLayer.style.width = `${img.offsetWidth}px`;
+    el.faceLayer.style.height = `${img.offsetHeight}px`;
+    el.faceLayer.hidden = false;
+  }
+
+  function hideFaces() {
+    state.faces = [];
+    el.faceLayer.innerHTML = "";
+    el.faceLayer.hidden = true;
+    el.viewerPick.hidden = true;
+    el.coverAll.hidden = true;
+  }
+
+  function pickHint(restored) {
+    if (!restored) return "Click a covered face to leave that person visible.";
+    return restored === 1
+      ? "1 person left visible. Click them to cover them again."
+      : `${restored} people left visible. Click one to cover them again.`;
+  }
+
+  function renderFaces(payload) {
+    const faces = payload.faces || [];
+    const width = payload.width || 0;
+    const height = payload.height || 0;
+    state.faces = faces;
+    el.faceLayer.innerHTML = "";
+
+    if (!faces.length || !width || !height) {
+      el.faceLayer.hidden = true;
+      el.viewerPick.hidden = true;
+      el.coverAll.hidden = true;
+      return;
+    }
+
+    for (const face of faces) {
+      const mask = face.mask;
+      if (!mask) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "face-hit";
+      if (!face.covered) {
+        button.classList.add("is-visible");
+        if (mask.cy / height > 0.88) button.classList.add("is-low");
+      }
+      button.style.left = `${(mask.cx / width) * 100}%`;
+      button.style.top = `${(mask.cy / height) * 100}%`;
+      button.style.width = `${((mask.ax * 2) / width) * 100}%`;
+      button.style.height = `${((mask.ay * 2) / height) * 100}%`;
+      button.style.transform = `translate(-50%, -50%) rotate(${mask.angle}deg)`;
+      button.title = face.covered
+        ? "Covered. Click to leave this person visible."
+        : "Left visible. Click to cover them again.";
+      button.setAttribute("aria-label", button.title);
+      button.addEventListener("click", () => toggleFace(face));
+      el.faceLayer.appendChild(button);
+    }
+
+    const restored = faces.filter((face) => !face.covered).length;
+    el.viewerPick.hidden = false;
+    el.pickHint.textContent = pickHint(restored);
+    el.coverAll.hidden = restored === 0;
+    syncFaceLayer();
+  }
+
+  async function toggleFace(face) {
+    if (!state.sid) return;
+    const sid = state.sid;
+    try {
+      const snapshot = await api(`/api/sessions/${sid}/faces`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          index: state.index,
+          key: face.key,
+          covered: !face.covered,
+        }),
+      });
+      if (sid !== state.sid) return;
+      // The reply is a full snapshot: the restore just invalidated any rendered
+      // result, and the rail has to stop offering a download it no longer has.
+      applySnapshot(snapshot);
+      await refreshPreview();
+    } catch (error) {
+      if (sid !== state.sid) return;
+      if (isSessionGone(error)) {
+        sessionLost();
+        return;
+      }
+      setNote(error.message);
+    }
+  }
+
+  async function coverEveryone() {
+    if (!state.sid) return;
+    const visible = state.faces.filter((face) => !face.covered);
+    if (!visible.length) return;
+    const sid = state.sid;
+    el.coverAll.disabled = true;
+    try {
+      let snapshot = null;
+      for (const face of visible) {
+        snapshot = await api(`/api/sessions/${sid}/faces`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ index: state.index, key: face.key, covered: true }),
+        });
+        if (sid !== state.sid) return;
+      }
+      if (snapshot) applySnapshot(snapshot);
+      await refreshPreview();
+    } catch (error) {
+      if (sid !== state.sid) return;
+      if (isSessionGone(error)) {
+        sessionLost();
+        return;
+      }
+      setNote(error.message);
+    } finally {
+      el.coverAll.disabled = false;
+    }
+  }
+
+  async function selectIndex(index) {    if (!state.snapshot || !state.snapshot.items.length) return;
     state.index = Math.max(0, Math.min(index, state.snapshot.items.length - 1));
     renderFiles();
     const item = state.snapshot.items[state.index];
@@ -343,7 +551,8 @@
       else chip = "";
 
       const faceText = item.scanned
-        ? `${item.faces} ${plural(item.faces, "face", "faces")}`
+        ? `${item.faces} ${plural(item.faces, "face", "faces")}` +
+          (item.restored ? ` · ${item.restored} left visible` : "")
         : "";
 
       button.innerHTML = `
@@ -446,7 +655,9 @@
     }
     el.metadataFlag.textContent =
       `Heads up: ${bits.join(" and ")}. ` +
-      `All of it is stripped from the redacted copies, along with any timestamps.`;
+      (state.settings.metadata === "spoof"
+        ? "The redacted copies replace all of it with a deliberately false timestamp, a made-up camera and a location in the emptiest stretch of the Pacific."
+        : "All of it is stripped from the redacted copies, along with any timestamps.");
   }
 
   function renderActions() {
@@ -519,6 +730,11 @@
     renderFiles();
     renderMetadataFlag();
     renderActions();
+
+    // Once the staged copies are freed there is nothing left to re-check a face
+    // against, so the click targets go too. Leaving them up would offer a button
+    // whose only possible answer is an error.
+    if (hasItems && snapshot.disk && snapshot.disk.inputs_freed) hideFaces();
 
     if (hasItems) {
       const item = snapshot.items[state.index];
@@ -622,6 +838,7 @@
     // but it becomes visible again the instant the new batch lands, and a note
     // describing the *old* photos under the new file's name is a lie.
     clearViewerCaption();
+    hideFaces();
     setNote("");
   }
 
@@ -668,6 +885,8 @@
         preset: state.settings.preset,
         margin: state.settings.margin,
         strength: state.settings.strength,
+        metadata: state.settings.metadata,
+        spoof_when: state.settings.spoof_when,
       })
     );
 
@@ -787,6 +1006,7 @@
     hideStaging();
     el.previewImg.removeAttribute("src");
     clearViewerCaption();
+    hideFaces();
     el.dropzone.hidden = false;
     el.viewer.hidden = true;
     el.resetBtn.hidden = true;
@@ -870,6 +1090,21 @@
       pushSettings();
     });
 
+    // "input" rather than "change": a datetime-local field fires "change" only
+    // when it is committed, which native pickers do inconsistently, and a
+    // half-filled field reads as an empty value that this guard drops. The
+    // settings POST is debounced anyway, so an edit does not mean a request.
+    el.spoofWhen.addEventListener("input", () => {
+      if (el.spoofWhen.value) state.settings.spoof_when = el.spoofWhen.value;
+      pushSettings();
+    });
+
+    // The image can be laid out later than the marks that describe it, so
+    // re-measure whenever either of them moves.
+    el.previewImg.addEventListener("load", syncFaceLayer);
+    window.addEventListener("resize", syncFaceLayer);
+    el.coverAll.addEventListener("click", coverEveryone);
+
     for (const seg of el.segs) {
       seg.addEventListener("click", () => {
         state.view = seg.dataset.view;
@@ -931,12 +1166,15 @@
       state.settings.mode = defaults.mode;
       state.settings.preset = defaults.preset;
       state.settings.strength = defaults.strength;
+      state.settings.metadata = defaults.metadata || "strip";
+      state.settings.spoof_when = defaults.spoof_when || "";
       const preset = config.presets.find((p) => p.key === defaults.preset);
       setMarginSlider(preset ? preset.margin : 0.14);
       el.strength.value = String(Math.round(state.settings.strength * 100));
 
       renderModes();
       renderPresets();
+      renderMetadataOptions();
       syncControls();
       renderActions();
 

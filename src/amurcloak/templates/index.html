@@ -104,7 +104,12 @@
       </div>
       <div class="viewer-canvas" id="viewer-canvas">
         <img id="preview-img" alt="Preview of the redaction for the selected photo">
+        <div class="face-layer" id="face-layer" hidden></div>
         <div class="viewer-loading" id="viewer-loading" hidden></div>
+      </div>
+      <div class="viewer-pick" id="viewer-pick" hidden>
+        <p class="pick-hint" id="pick-hint"></p>
+        <button type="button" class="btn btn-quiet btn-tiny" id="cover-all" hidden>Cover everyone again</button>
       </div>
       <p class="viewer-note" id="viewer-note" aria-live="polite"></p>
     </div>
@@ -142,6 +147,16 @@
           <input type="range" id="strength" min="0" max="100" value="70" step="5">
           <p class="slider-note" id="strength-note"></p>
         </div>
+      </fieldset>
+
+      <fieldset class="group" id="group-metadata">
+        <legend>Metadata</legend>
+        <div class="segmented segmented-wide" id="metadata-options" role="group" aria-label="What the exported file claims"></div>
+        <div class="when-row" id="when-row" hidden>
+          <label for="spoof-when">Date it claims</label>
+          <input type="datetime-local" id="spoof-when" step="60">
+        </div>
+        <p class="slider-note" id="metadata-note"></p>
       </fieldset>
 
     </div>

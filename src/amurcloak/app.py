@@ -286,6 +286,34 @@ def create_app(config: Config | None = None):
             session.forget_detections()
         return jsonify({"settings": settings.to_dict(), **outcome})
 
+    # -- picking people ----------------------------------------------------
+
+    @app.post("/api/sessions/<sid>/faces")
+    def set_face(sid: str):
+        """Leave one detected person visible, or cover them again.
+
+        ``covered: false`` restores: the person keeps their original pixels in
+        the export. Deliberately per photo and per box - this tool has no idea who
+        anyone is, and matching "the same person" across a batch would need face
+        recognition, which is the thing it exists to avoid.
+        """
+        session = store.get(sid)
+        if session is None:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+
+        index = payload.get("index")
+        if not isinstance(index, int) or isinstance(index, bool):
+            return jsonify({"error": "index must be a whole number"}), 400
+        covered = payload.get("covered")
+        if not isinstance(covered, bool):
+            return jsonify({"error": "covered must be true or false"}), 400
+
+        error = session.set_restored(index, payload.get("key"), not covered)
+        if error is not None:
+            return jsonify({"error": error}), 400
+        return jsonify(session.snapshot())
+
     @app.get("/api/sessions/<sid>/preview")
     def preview(sid: str):
         session = store.get(sid)
@@ -314,8 +342,12 @@ def create_app(config: Config | None = None):
         except photo_io.PhotoError as exc:
             return jsonify({"error": str(exc), "index": index}), 422
 
-        image = pipeline.render_preview_bytes(decoded, faces, settings, view)
-        report = pipeline.scene_report(faces, settings, decoded)
+        masked = session.covered(item, detector)
+        kept = session.restored_faces(item, detector)
+        kept_keys = frozenset(f.key() for f in kept)
+
+        image = pipeline.render_preview_bytes(decoded, masked, settings, view, restored=kept)
+        report = pipeline.scene_report(faces, settings, decoded, kept_keys)
         report.update(
             {
                 "index": index,

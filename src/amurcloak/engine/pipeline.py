@@ -12,6 +12,8 @@ be exactly what you get.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import cv2
 import numpy as np
 
@@ -67,14 +69,19 @@ def compose_preview(
     settings: Settings,
     view: str = "result",
     max_edge: int = PREVIEW_MAX_EDGE,
+    *,
+    restored: Sequence[Face] = (),
 ) -> np.ndarray:
     """Full-resolution preview, downscaled for transport.
 
     ``view='audit'`` outlines every detection so the user can verify nothing was
     missed; ``view='result'`` shows the actual redaction.
+
+    ``faces`` is what will be masked. ``restored`` is only for the audit map,
+    which marks the people the user chose to leave visible.
     """
     if view == "audit":
-        composed = redact.render_audit(decoded.bgr, faces, settings.margin)
+        composed = redact.render_audit(decoded.bgr, faces, settings.margin, restored)
     else:
         composed = decoded.bgr.copy()
         redact.apply_redaction(
@@ -102,24 +109,57 @@ def render_preview_bytes(
     settings: Settings,
     view: str = "result",
     max_edge: int = PREVIEW_MAX_EDGE,
+    *,
+    restored: Sequence[Face] = (),
 ) -> bytes:
-    return encode_preview(compose_preview(decoded, faces, settings, view, max_edge))
+    return encode_preview(
+        compose_preview(decoded, faces, settings, view, max_edge, restored=restored)
+    )
 
 
 def scene_report(
     faces: list[Face],
     settings: Settings,
     decoded: Photo | None = None,
+    restored_keys: frozenset[tuple[int, int, int, int]] = frozenset(),
 ) -> dict:
-    """Everything the UI needs to describe the scene in words and numbers."""
+    """Everything the UI needs to describe the scene in words and numbers.
+
+    ``faces`` is every detection. ``restored_keys`` are the ones the user chose to
+    leave visible, so each entry can say whether the export will cover it - the
+    UI draws its click targets straight from this, which is what keeps the
+    picture on screen and the file on disk in agreement.
+    """
     strong = sum(1 for f in faces if f.score >= 0.65)
     weak = len(faces) - strong
+
+    entries = []
+    for face in faces:
+        key = face.key()
+        mark = redact.ellipse_from_face(face, settings.margin)
+        entry = face.to_dict()
+        entry["key"] = list(key)
+        entry["covered"] = key not in restored_keys
+        # The mask's real geometry, so the browser can lay a click target exactly
+        # over the shape that was painted instead of approximating a box.
+        entry["mask"] = {
+            "cx": round(mark.cx, 1),
+            "cy": round(mark.cy, 1),
+            "ax": round(mark.ax, 1),
+            "ay": round(mark.ay, 1),
+            "angle": round(mark.angle, 2),
+        }
+        entries.append(entry)
+
+    restored = sum(1 for entry in entries if not entry["covered"])
     report = {
         "count": len(faces),
+        "covered": len(faces) - restored,
+        "restored": restored,
         "strong": strong,
         "weak": weak,
         "note": redact.confidence_note(faces),
-        "faces": redact.summary(faces),
+        "faces": entries,
         "mode": settings.mode,
         "margin": settings.margin,
         "strength": settings.strength,

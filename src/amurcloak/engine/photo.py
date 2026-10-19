@@ -21,11 +21,15 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL.TiffImagePlugin import IFDRational
+
+from . import presets
 
 try:  # iPhone photos are HEIC; without this most phone libraries simply cannot open.
     import pillow_heif
@@ -45,7 +49,38 @@ EXIF_ORIENTATION = 0x0112
 EXIF_MAKE = 0x010F
 EXIF_MODEL = 0x0110
 EXIF_DATETIME = 0x0132
+EXIF_DATETIME_ORIGINAL = 0x9003
+EXIF_DATETIME_DIGITIZED = 0x9004
 EXIF_GPS_IFD = 0x8825
+
+# Sub-tags inside the GPS IFD (a second tag directory hung off EXIF_GPS_IFD).
+GPS_LAT_REF = 1
+GPS_LAT = 2
+GPS_LON_REF = 3
+GPS_LON = 4
+GPS_TIME = 7
+GPS_DATE = 0x001D
+
+# ---------------------------------------------------------------------------
+# Forged metadata (opt-in - see presets.METADATA_POLICIES)
+# ---------------------------------------------------------------------------
+# What a spoofed file claims to be. A phone is statistically the least
+# remarkable thing a shared photo can say it came from.
+SPOOF_MAKE = "Apple"
+SPOOF_MODEL = "iPhone 13"
+
+# Point Nemo - 48 52 36 S, 123 23 36 W. The oceanic pole of inaccessibility, and
+# the furthest you can get from land anywhere on Earth (~2,688 km).
+#
+# Fixed, and deliberately not a setting. A forged timestamp is harmless, because
+# a wrong time is only a wrong time. A forged *location* is a claim about place,
+# and a place can be somebody's front door. Locking it to the emptiest point on
+# the planet keeps the feature useful for hiding where you were while making it
+# structurally impossible for it to name a home or a workplace.
+SPOOF_GPS_LAT = (48, 52, 36)  # degrees, minutes, seconds
+SPOOF_GPS_LAT_REF = "S"
+SPOOF_GPS_LON = (123, 23, 36)
+SPOOF_GPS_LON_REF = "W"
 
 SUPPORTED_IN = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff"}
 
@@ -171,6 +206,59 @@ def load_photo(path: str | Path) -> Photo:
     return Photo(bgr=bgr, alpha=alpha, icc=icc, source_ext=ext, width=w, height=h)
 
 
+def _dms(parts: tuple[int, int, int]) -> list[IFDRational]:
+    """Degrees/minutes/seconds as the three rationals EXIF expects."""
+    return [IFDRational(part, 1) for part in parts]
+
+
+def forged_exif(when: str, *, with_gps: bool = True) -> bytes:
+    """Build a deliberately false EXIF block out of nothing.
+
+    Built from scratch and never copied from the source file. That is not
+    tidiness: an EXIF block can carry a *thumbnail*, which is a small copy of the
+    original photo. Copying the source tags would therefore ship the unredacted
+    face inside the metadata of the redacted file. Starting from an empty block
+    means there is no thumbnail, no maker notes, no XMP and no IPTC - only the
+    claims below, which is also why the lie stays internally consistent.
+
+    ``when`` is ``YYYY-MM-DDTHH:MM`` (see presets.normalize_when). Orientation is
+    written as 1 because the pixels reaching us are already upright; anything
+    else would make viewers rotate the export.
+
+    ``with_gps=False`` drops the forged location. TIFF needs that: Pillow can
+    only attach a nested GPS directory on its own uncompressed writer, and
+    libtiff rejects the offset it generates for a compressed one. Rather than
+    change the encoding of the archival format to plant a fake place, a spoofed
+    TIFF carries no place at all - which is the safer of the two outcomes anyway.
+    """
+    try:
+        moment = datetime.fromisoformat(when)
+    except (TypeError, ValueError):
+        moment = datetime.fromisoformat(presets.DEFAULT_SPOOF_WHEN)
+    stamp = moment.strftime("%Y:%m:%d %H:%M:%S")
+
+    exif = Image.Exif()
+    # All three timestamps, set to the same instant: a file where they disagree
+    # is a file that announces it was edited.
+    exif[EXIF_DATETIME] = stamp
+    exif[EXIF_DATETIME_ORIGINAL] = stamp
+    exif[EXIF_DATETIME_DIGITIZED] = stamp
+    exif[EXIF_MAKE] = SPOOF_MAKE
+    exif[EXIF_MODEL] = SPOOF_MODEL
+    exif[EXIF_ORIENTATION] = 1
+
+    if with_gps:
+        gps = exif.get_ifd(EXIF_GPS_IFD)
+        gps[GPS_LAT_REF] = SPOOF_GPS_LAT_REF
+        gps[GPS_LAT] = _dms(SPOOF_GPS_LAT)
+        gps[GPS_LON_REF] = SPOOF_GPS_LON_REF
+        gps[GPS_LON] = _dms(SPOOF_GPS_LON)
+        gps[GPS_DATE] = stamp[:10]
+        gps[GPS_TIME] = _dms((moment.hour, moment.minute, moment.second))
+
+    return exif.tobytes()
+
+
 def save_photo(
     path: str | Path,
     bgr: np.ndarray,
@@ -179,18 +267,35 @@ def save_photo(
     *,
     quality: int = 95,
     keep_icc: bool = True,
+    metadata: str = presets.DEFAULT_METADATA,
+    spoof_when: str = presets.DEFAULT_SPOOF_WHEN,
 ) -> None:
-    """Write BGR pixels out with *no* metadata beyond an optional colour profile.
+    """Write BGR pixels out with nothing but an optional colour profile and a policy.
 
-    ICC is deliberately retained: iPhone photos are Display P3, and dropping the
-    profile makes them assume sRGB and visibly desaturate. An ICC profile is a
-    colour-space descriptor, not identity data. Pass ``keep_icc=False`` to drop
-    it too. EXIF, XMP, IPTC, GPS and PNG text chunks are always discarded - they
-    never reach this function because the pixels arrive as a raw numpy array.
+    ``metadata="strip"`` (the default) writes no metadata at all. ICC is
+    deliberately retained in that case only if the caller asks for it: iPhone
+    photos are Display P3, and dropping the profile makes them assume sRGB and
+    visibly desaturate. Pass ``keep_icc=False`` to drop it too. EXIF, XMP, IPTC,
+    GPS and PNG text chunks never reach this function, because the pixels arrive
+    as a raw numpy array.
+
+    ``metadata="spoof"`` strips all of the above and then writes the forged
+    block from :func:`forged_exif` in its place. That trades an honest absence
+    for a false presence, which is why it is opt-in.
     """
     path = Path(path)
     ext = path.suffix.lower()
     profile = icc if (keep_icc and icc) else None
+    exif = None
+    if metadata == "spoof":
+        # See forged_exif: a compressed TIFF cannot carry the GPS sub-IFD.
+        exif = forged_exif(spoof_when, with_gps=ext not in (".tif", ".tiff"))
+
+    # Pillow calls len() on the exif argument, so passing None is not the same as
+    # omitting it. Only hand it over when there is one to write.
+    extra: dict = {"icc_profile": profile}
+    if exif is not None:
+        extra["exif"] = exif
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     image = Image.fromarray(rgb)
@@ -209,7 +314,7 @@ def save_photo(
                 subsampling=0,  # keep chroma; q95 + 4:4:4 is visually lossless
                 optimize=True,
                 progressive=True,
-                icc_profile=profile,
+                **extra,
             )
         elif ext == ".png":
             # compress_level 9 costs seconds on a 12MP image for a few percent.
@@ -219,10 +324,15 @@ def save_photo(
                 format="PNG",
                 optimize=True,
                 compress_level=6,
-                icc_profile=profile,
+                **extra,
             )
         elif ext in (".tif", ".tiff"):
-            image.save(path, format="TIFF", compression="tiff_deflate", icc_profile=profile)
+            image.save(
+                path,
+                format="TIFF",
+                compression="tiff_deflate",
+                **extra,
+            )
         else:
             raise UnsupportedFormatError(f"cannot write {ext} output")
     except PhotoError:

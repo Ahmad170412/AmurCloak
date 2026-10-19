@@ -16,6 +16,7 @@ head properly, which matters as soon as someone cocks their head in a photo.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import cv2
@@ -34,6 +35,7 @@ MAX_ROLL_DEG = 75.0
 AUDIT_ACCENT = (32, 176, 255)  # BGR amber
 AUDIT_BOX = (170, 170, 170)
 AUDIT_INK = (16, 16, 16)
+AUDIT_KEEP = (122, 222, 138)  # BGR green: detected, deliberately left visible
 
 
 @dataclass
@@ -168,29 +170,92 @@ def apply_redaction(
     return masked
 
 
-def render_audit(bgr: np.ndarray, faces: list[Face], margin: float = 0.14) -> np.ndarray:
+def _audit_chip(
+    canvas: np.ndarray,
+    box: tuple[int, int, int, int],
+    label: str,
+    scale: float,
+    colour: tuple[int, int, int],
+) -> None:
+    """The numbered tag that sits beside a box.
+
+    Covered and kept faces share this layout so the tags line up; they differ
+    only in colour. Extracted rather than duplicated so the two never drift.
+    """
+    height, width = canvas.shape[:2]
+    bx0, by0, _, by1 = box
+    thickness = 1
+    (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    chip_h = th + baseline + 8
+    chip_w = tw + 12
+
+    lx = min(max(0, bx0), max(0, width - chip_w))
+    ly = by0 - chip_h - 4
+    if ly < 0:
+        ly = min(height - chip_h, by1 + 4)
+    ly = max(0, ly)
+
+    cv2.rectangle(
+        canvas,
+        (lx, ly),
+        (lx + chip_w, ly + chip_h),
+        AUDIT_INK,
+        -1,
+        cv2.LINE_AA,
+    )
+    cv2.rectangle(
+        canvas,
+        (lx, ly),
+        (lx + chip_w, ly + chip_h),
+        colour,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        label,
+        (lx + 6, ly + th + 4),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        colour,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def render_audit(
+    bgr: np.ndarray,
+    faces: list[Face],
+    margin: float = 0.14,
+    restored: Sequence[Face] = (),
+) -> np.ndarray:
     """Annotated copy for the audit map: what will be covered, and how sure we are.
 
     This is the trust-building view. If a face is visible in the audit map, the
     user knows the tool saw it; if someone is missed, they can see that too and
     pick a more thorough preset before committing.
+
+    ``restored`` faces were detected but the user chose to leave them visible.
+    They get a second colour instead of the wash, because washing them would show
+    them as covered when the export will not cover them.
     """
     canvas = bgr.copy()
-    if not faces:
+    if not faces and not restored:
         return canvas
 
     height, width = canvas.shape[:2]
-    tint = canvas.copy()
 
-    for face in faces:
-        ell = ellipse_from_face(face, margin)
-        center = (round(ell.cx), round(ell.cy))
-        axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
-        cv2.ellipse(tint, center, axes, ell.angle, 0, 360, AUDIT_ACCENT, -1, cv2.LINE_AA)
+    if faces:
+        tint = canvas.copy()
+        for face in faces:
+            ell = ellipse_from_face(face, margin)
+            center = (round(ell.cx), round(ell.cy))
+            axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
+            cv2.ellipse(tint, center, axes, ell.angle, 0, 360, AUDIT_ACCENT, -1, cv2.LINE_AA)
 
-    # Translucent wash so the covered region reads at a glance without hiding
-    # the face underneath - the user needs to see who is being covered.
-    cv2.addWeighted(tint, 0.22, canvas, 0.78, 0, canvas)
+        # Translucent wash so the covered region reads at a glance without hiding
+        # the face underneath - the user needs to see who is being covered.
+        cv2.addWeighted(tint, 0.22, canvas, 0.78, 0, canvas)
 
     for index, face in enumerate(faces, start=1):
         ell = ellipse_from_face(face, margin)
@@ -204,53 +269,25 @@ def render_audit(bgr: np.ndarray, faces: list[Face], margin: float = 0.14) -> np
         by1 = int(min(height - 1, face.y + face.h))
         cv2.rectangle(canvas, (bx0, by0), (bx1, by1), AUDIT_BOX, 1, cv2.LINE_AA)
 
-        label = f"{index}  {face.score:.2f}"
         scale = max(0.42, min(0.9, face.w / 190.0))
-        thickness = 1
-        (tw, th), baseline = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
-        )
-        chip_h = th + baseline + 8
-        chip_w = tw + 12
+        _audit_chip(canvas, (bx0, by0, bx1, by1), f"{index}  {face.score:.2f}", scale, AUDIT_ACCENT)
 
-        lx = min(max(0, bx0), max(0, width - chip_w))
-        ly = by0 - chip_h - 4
-        if ly < 0:
-            ly = min(height - chip_h, by1 + 4)
-        ly = max(0, ly)
+    for face in restored:
+        ell = ellipse_from_face(face, margin)
+        center = (round(ell.cx), round(ell.cy))
+        axes = (max(1, round(ell.ax)), max(1, round(ell.ay)))
+        cv2.ellipse(canvas, center, axes, ell.angle, 0, 360, AUDIT_KEEP, 2, cv2.LINE_AA)
 
-        cv2.rectangle(
-            canvas,
-            (lx, ly),
-            (lx + chip_w, ly + chip_h),
-            AUDIT_INK,
-            -1,
-            cv2.LINE_AA,
-        )
-        cv2.rectangle(
-            canvas,
-            (lx, ly),
-            (lx + chip_w, ly + chip_h),
-            AUDIT_ACCENT,
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            canvas,
-            label,
-            (lx + 6, ly + th + 4),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            scale,
-            AUDIT_ACCENT,
-            thickness,
-            cv2.LINE_AA,
-        )
+        bx0 = int(max(0, face.x))
+        by0 = int(max(0, face.y))
+        bx1 = int(min(width - 1, face.x + face.w))
+        by1 = int(min(height - 1, face.y + face.h))
+        cv2.rectangle(canvas, (bx0, by0), (bx1, by1), AUDIT_KEEP, 1, cv2.LINE_AA)
+
+        scale = max(0.42, min(0.9, face.w / 190.0))
+        _audit_chip(canvas, (bx0, by0, bx1, by1), f"kept  {face.score:.2f}", scale, AUDIT_KEEP)
 
     return canvas
-
-
-def summary(faces: list[Face]) -> list[dict]:
-    return [f.to_dict() for f in faces]
 
 
 def confidence_note(faces: list[Face]) -> str:

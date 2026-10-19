@@ -12,6 +12,7 @@ is gone from the output.
 from __future__ import annotations
 
 import math
+import struct
 import sys
 import traceback
 from pathlib import Path
@@ -358,6 +359,268 @@ def t_payload_rejects_non_finite():
     require(math.isfinite(s.margin) and s.margin == 0.14, f"margin leaked as {s.margin}")
     require(math.isfinite(s.strength) and s.strength == 0.7, f"strength leaked as {s.strength}")
     require(math.isfinite(s.strength) and s.quality == 95, f"quality leaked as {s.quality}")
+
+
+# ---------------------------------------------------------------------------
+# forged metadata (active defence)
+# ---------------------------------------------------------------------------
+
+# EXIF/TIFF tag numbers used by the checks below.
+TAG_MAKE = 0x010F
+TAG_MODEL = 0x0110
+TAG_ORIENTATION = 0x0112
+TAG_DATETIME = 0x0132
+TAG_THUMB_OFFSET = 0x0201
+TAG_THUMB_LENGTH = 0x0202
+TAG_DATETIME_ORIGINAL = 0x9003
+TAG_DATETIME_DIGITIZED = 0x9004
+TAG_GPS_IFD = 0x8825
+
+POINT_NEMO = ([48.0, 52.0, 36.0], [123.0, 23.0, 36.0])
+
+
+def exif_with_thumbnail(make: str, model: str, when: str, thumb_jpeg: bytes) -> bytes:
+    """A hand-built EXIF block carrying a real thumbnail of the original.
+
+    Pillow will not write thumbnail tags for us - they need a resolved offset
+    into the APP1 block - so the TIFF structure is assembled by hand. That makes
+    it a faithful stand-in for a camera JPEG: a complete second JPEG stream
+    (the unredacted preview) living inside the metadata.
+    """
+    ascii_type, short_type, long_type = 2, 3, 4
+
+    def entry(tag: int, kind: int, count: int, value: bytes) -> bytes:
+        return struct.pack("<HHI", tag, kind, count) + value
+
+    def text_entry(tag: int, text: str, offset: int) -> bytes:
+        raw = text.encode("ascii") + b"\x00"
+        if len(raw) <= 4:
+            return entry(tag, ascii_type, len(raw), raw.ljust(4, b"\x00"))
+        return entry(tag, ascii_type, len(raw), struct.pack("<I", offset))
+
+    make_b = make.encode("ascii") + b"\x00"
+    model_b = model.encode("ascii") + b"\x00"
+    when_b = when.encode("ascii") + b"\x00"
+
+    def ifd_size(count: int) -> int:
+        return 2 + 12 * count + 4
+
+    ifd0_at = 8
+    ifd1_at = ifd0_at + ifd_size(3)
+    data_at = ifd1_at + ifd_size(3)
+    make_at = data_at
+    model_at = make_at + len(make_b)
+    when_at = model_at + len(model_b)
+    thumb_at = when_at + len(when_b)
+
+    ifd0 = (
+        struct.pack("<H", 3)
+        + text_entry(TAG_MAKE, make, make_at)
+        + text_entry(TAG_MODEL, model, model_at)
+        + text_entry(TAG_DATETIME, when, when_at)
+        + struct.pack("<I", ifd1_at)  # next IFD = the thumbnail directory
+    )
+    ifd1 = (
+        struct.pack("<H", 3)
+        + entry(0x0103, short_type, 1, struct.pack("<HH", 6, 0))  # JPEG
+        + entry(TAG_THUMB_OFFSET, long_type, 1, struct.pack("<I", thumb_at))
+        + entry(TAG_THUMB_LENGTH, long_type, 1, struct.pack("<I", len(thumb_jpeg)))
+        + struct.pack("<I", 0)
+    )
+    tiff = (
+        b"II"
+        + struct.pack("<HI", 42, ifd0_at)
+        + ifd0
+        + ifd1
+        + make_b
+        + model_b
+        + when_b
+        + thumb_jpeg
+    )
+    return b"Exif\x00\x00" + tiff
+
+
+def gps_degrees(gps: dict) -> tuple[list[float], list[float]]:
+    lat = [float(part) for part in gps[2]]
+    lon = [float(part) for part in gps[4]]
+    return lat, lon
+
+
+@check("spoofed output carries one consistent, thumbnail-free EXIF block")
+def t_spoof_forges_the_block():
+    for ext in (".jpg", ".png", ".tif"):
+        path = GEN / f"spoofed{ext}"
+        photo.save_photo(
+            path,
+            lena_bgr(),
+            None,
+            None,
+            quality=95,
+            metadata="spoof",
+            spoof_when="1453-05-05T06:00",
+        )
+        with Image.open(path) as out:
+            exif = out.getexif()
+            require("xmp" not in out.info, f"{ext}: XMP was written")
+
+        # All three timestamps agree. A file where they disagree announces that
+        # it was edited, which defeats the point of forging them.
+        for tag, label in (
+            (TAG_DATETIME, "DateTime"),
+            (TAG_DATETIME_ORIGINAL, "DateTimeOriginal"),
+            (TAG_DATETIME_DIGITIZED, "DateTimeDigitized"),
+        ):
+            require(
+                exif.get(tag) == "1453:05:05 06:00:00",
+                f"{ext}: {label} was {exif.get(tag)!r}",
+            )
+        require(exif.get(TAG_MAKE) == "Apple", f"{ext}: make was {exif.get(TAG_MAKE)!r}")
+        require(exif.get(TAG_MODEL) == "iPhone 13", f"{ext}: model was {exif.get(TAG_MODEL)!r}")
+        require(
+            exif.get(TAG_ORIENTATION) == 1,
+            f"{ext}: orientation must be 1 so the upright pixels stay upright",
+        )
+
+        gps = exif.get_ifd(TAG_GPS_IFD)
+        if ext in (".tif", ".tiff"):
+            # Documented exception: a compressed TIFF cannot carry a nested GPS
+            # directory (libtiff rejects Pillow's offset), and changing the
+            # archival format's encoding to plant a fake place is not worth it.
+            require(not gps, f"{ext}: a compressed TIFF should carry no GPS at all")
+        else:
+            lat, lon = gps_degrees(gps)
+            require(lat == POINT_NEMO[0], f"{ext}: latitude was {lat}")
+            require(lon == POINT_NEMO[1], f"{ext}: longitude was {lon}")
+            require(gps.get(1) == "S" and gps.get(3) == "W", f"{ext}: hemisphere refs missing")
+            require(gps.get(0x001D) == "1453:05:05", f"{ext}: GPS date was {gps.get(0x001D)!r}")
+
+        require(TAG_THUMB_OFFSET not in exif, f"{ext}: thumbnail pointer present")
+        require(TAG_THUMB_LENGTH not in exif, f"{ext}: thumbnail length present")
+        require(dict(exif.get_ifd(1)) == {}, f"{ext}: an IFD1 thumbnail directory was written")
+
+
+@check("spoofing cannot smuggle the original photo back in as a thumbnail")
+def t_spoof_never_carries_the_original():
+    # This is the failure that would matter most: an EXIF thumbnail is a small
+    # copy of the ORIGINAL image, so a spoofing pass that copied the source's
+    # tags would ship the un-redacted face inside the "metadata" of the redacted
+    # file. Build a genuine leaky source and prove none of it survives.
+    source = GEN / "leaky_source.jpg"
+    base = lena_bgr()
+    thumb = cv2.resize(base, (80, 80), interpolation=cv2.INTER_AREA)
+    ok, buffer = cv2.imencode(".jpg", thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    require(ok, "could not encode the thumbnail")
+    thumb_bytes = buffer.tobytes()
+    Image.open(LENA).convert("RGB").save(
+        source,
+        exif=exif_with_thumbnail(
+            "Originalcam", "Secret Phone", "2011:03:04 05:06:07", thumb_bytes
+        ),
+        quality=90,
+    )
+
+    raw = source.read_bytes()
+    require(raw.count(b"\xff\xd8\xff") == 2, "the source should carry a second JPEG stream")
+    require(thumb_bytes in raw, "the source thumbnail should really be embedded")
+    with Image.open(source) as im:
+        source_exif = im.getexif()
+    require(source_exif.get(TAG_MAKE) == "Originalcam", "the source should carry a real camera")
+
+    redacted = np.full_like(base, 12)
+    out = GEN / "spoofed_from_leaky.jpg"
+    photo.save_photo(out, redacted, None, None, quality=95, metadata="spoof")
+
+    data = out.read_bytes()
+    require(
+        data.count(b"\xff\xd8\xff") == 1,
+        "the output must hold exactly one JPEG stream - the redacted one",
+    )
+    require(thumb_bytes not in data, "the original thumbnail leaked into the spoofed file")
+    with Image.open(out) as im:
+        exif = im.getexif()
+        info = dict(im.info)
+    require(TAG_THUMB_OFFSET not in exif and TAG_THUMB_LENGTH not in exif, "thumbnail written")
+    require(dict(exif.get_ifd(1)) == {}, "IFD1 thumbnail directory written")
+    require(exif.get(TAG_MAKE) == "Apple", "the forged camera should replace the real one")
+    require(exif.get(TAG_DATETIME) == "1453:05:05 06:00:00", "forged timestamp missing")
+    require("xmp" not in info and "exif" in info, "the forged block should be the only metadata")
+
+    # Forging metadata must not resurrect the pixels underneath it.
+    recovered = photo.load_photo(out).bgr.astype(int)
+    require(
+        abs(int(recovered.mean()) - 12) <= 3,
+        f"the redacted pixels did not survive the metadata write: {recovered.mean():.1f}",
+    )
+
+
+@check("spoofing is opt-in, and a junk date degrades to the default")
+def t_spoof_is_opt_in():
+    # The default is still "no metadata at all" - the simpler, stronger promise.
+    default_out = GEN / "stripped_by_default.jpg"
+    photo.save_photo(default_out, lena_bgr(), None, None, quality=95)
+    with Image.open(default_out) as im:
+        require(not im.getexif(), "a default save grew an EXIF block")
+
+    # An unknown policy is ignored rather than guessed at, and a date that cannot
+    # be parsed keeps the default instead of inventing one.
+    settings = from_payload({"metadata": "whatever", "spoof_when": "not-a-date"})
+    require(settings.metadata == "strip", f"unknown policy honoured: {settings.metadata!r}")
+    require(settings.spoof_when == "1453-05-05T06:00", f"junk date: {settings.spoof_when!r}")
+
+    settings = from_payload({"metadata": "spoof", "spoof_when": "2024-07-01T09:30"})
+    require(settings.metadata == "spoof", "a valid policy was dropped")
+    require(settings.spoof_when == "2024-07-01T09:30", f"normalised to {settings.spoof_when!r}")
+    # A date with no time is accepted, and lands at midnight.
+    require(
+        from_payload({"spoof_when": "2024-07-01"}).spoof_when == "2024-07-01T00:00",
+        "a date-only value should be accepted at midnight",
+    )
+    # An impossible date is junk like any other.
+    require(
+        from_payload({"spoof_when": "1453-02-31"}).spoof_when == "1453-05-05T06:00",
+        "31 February should not be accepted",
+    )
+
+    recent = GEN / "spoofed_recent.jpg"
+    photo.save_photo(
+        recent,
+        lena_bgr(),
+        None,
+        None,
+        quality=95,
+        metadata=settings.metadata,
+        spoof_when=settings.spoof_when,
+    )
+    with Image.open(recent) as im:
+        require(im.getexif().get(TAG_DATETIME) == "2024:07:01 09:30:00", "chosen date not used")
+
+
+@check("the audit map marks a kept face without washing it")
+def t_audit_marks_kept_faces():
+    base = lena_bgr()
+    faces = FaceDetector(score=0.6, min_face=24).detect(base)
+    require(faces, "expected a face to draw")
+
+    plain = redact.render_audit(base, faces, 0.14)
+    same = redact.render_audit(base, faces, 0.14, [])
+    require(np.array_equal(plain, same), "an empty kept list must change nothing at all")
+
+    face = faces[0]
+    cx, cy = int(face.cx), int(face.cy)
+    washed = redact.render_audit(base, faces, 0.14)
+    kept = redact.render_audit(base, [], 0.14, faces)
+    require(
+        not np.array_equal(washed[cy, cx], base[cy, cx]),
+        "a covered face should be washed in the audit map",
+    )
+    require(
+        np.array_equal(kept[cy, cx], base[cy, cx]),
+        "a kept face must not be washed - the export will not cover it",
+    )
+    require(
+        not np.array_equal(kept, base),
+        "a kept face should still be outlined so the user can see it was found",
+    )
 
 
 # ---------------------------------------------------------------------------

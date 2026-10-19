@@ -11,7 +11,7 @@ No uploads, no accounts, no telemetry. Drop photos in, check the map, download r
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-26%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-35%20passing-3f6b52)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
@@ -110,11 +110,11 @@ A single process, one request at a time, no queue and no worker pool:
  ┌─────────────┐   black  · opaque, irreversible
  │   redact    │   pixelate · mosaic blocks, partly reversible
  └──────┬──────┘   blur   · Gaussian, partly reversible
-        ▼
+        ▼          faces you left visible are passed through untouched
  ┌─────────────┐   alpha → PNG      .heic/.heif → JPEG
  │   encode    │   .png → PNG       everything else → JPEG q95
  └──────┬──────┘   .tif/.tiff → TIFF
-        ▼
+        ▼          EXIF dropped, or a forged block written in its place
    single file, or a ZIP streamed one entry at a time
 ```
 
@@ -131,6 +131,8 @@ A single process, one request at a time, no queue and no worker pool:
 | **Audit map** | Annotated preview with numbered boxes, landmark-fitted ellipses, and per-face confidence, so you can verify coverage before rendering. |
 | **Roll-aware mask** | The ellipse is aligned to the eye line, so it follows a tilted head instead of clipping the chin. |
 | **Metadata stripping** | EXIF, XMP, IPTC and GPS are dropped by default. The ICC profile is kept, so iPhone Display P3 colours survive. |
+| **Leave one person visible** | Click any covered face in the preview to give that person their pixels back — the person waving behind the birthday cake stays in the photo. Per photo, and never matched across a batch. |
+| **Forged metadata (opt-in)** | Leave stripped, or write a deliberately false block instead: a chosen date on all three timestamp tags, a made-up camera, and a location fixed to the emptiest point in the Pacific — built from nothing, so no thumbnail and no maker notes from the original can tag along. |
 | **HEIC support** | iPhone photos work directly, via `pillow-heif`. |
 | **Nine input formats** | BMP, HEIC, HEIF, JPEG, PNG, TIFF, WebP — outputs keep the original format. |
 | **Streaming batches** | Outputs are appended to a `ZIP_STORED` archive and unlinked as they go, so a batch never exists twice on disk. |
@@ -242,13 +244,44 @@ An upload that will not fit is refused **before** anything is written, and the e
 
 1. **Drop photos** anywhere on the page, paste a screenshot, or click **Choose photos**.
 2. **Check the audit map.** Every detection is numbered and scored. Switch to **Result** to see the actual redaction.
-3. **Pick a cover mode.** Solid black is selected by default. Adjust **Coverage** to push the mask further past the face, and **Strength** to change the blur or block size — the latter is disabled in black mode, because solid black ignores it.
-4. **Choose how hard to look.** Cautious, Balanced or Thorough, which trades false positives against missed faces.
-5. **Redact photos**, then **Download**. One photo downloads as a single image; several are bundled into a ZIP.
+3. **Leave someone visible, if you want to.** Click a covered face to give that person their pixels back; click again to cover them.
+4. **Pick a cover mode.** Solid black is selected by default. Adjust **Coverage** to push the mask further past the face, and **Strength** to change the blur or block size — the latter is disabled in black mode, because solid black ignores it.
+5. **Choose how hard to look.** Cautious, Balanced or Thorough, which trades false positives against missed faces.
+6. **Decide what the file says about itself.** **Removed** drops all metadata; **Forged** replaces it with a date you choose, a made-up camera and a location in the middle of the ocean.
+7. **Redact photos**, then **Download**. One photo downloads as a single image; several are bundled into a ZIP.
 
-Settings apply to the whole staged set, and changing any of them invalidates a rendered result rather than letting you download pixels that no longer match what is on screen.
+Settings apply to the whole staged set, and changing any of them — or leaving a different set of faces visible — invalidates a rendered result rather than letting you download pixels that no longer match what is on screen.
 
 A batch is held in the running server's memory, so quitting `amurcloak` — or leaving a batch untouched past `--ttl` — clears it. The page notices and asks for the photos again rather than leaving a stale preview up, which matters because a frame that no longer matches its settings is worse than no frame at all.
+
+### Leaving someone visible
+
+Every face starts covered, which is the only safe default. Click a face in the preview — the audit map and the result view carry the same click targets — and that person keeps their own pixels in the export. The ring turns green with a `visible` tag under it; click again to cover them, or **Cover everyone again** to reset the photo.
+
+Three details are deliberate:
+
+- **It is per photo.** Faces are never matched across a batch. Two photos of the same person are two independent decisions, because the alternative is exactly the face recognition this tool exists to avoid.
+- **The decision is not painted into the image.** The green ring and the tag are browser overlays. Nothing in the exported file hints that a face was spared, and the audit map marks a spared face differently for the same reason.
+- **It invalidates a rendered result**, just as changing a setting does, so a download can never disagree with the screen.
+
+### Metadata
+
+Two policies. The default is the one that says nothing at all:
+
+| Policy | What the exported file carries |
+|---|---|
+| **Removed** (default) | No EXIF, no GPS, no XMP, no IPTC, no maker notes, no thumbnail. The ICC profile is kept so the colours are right. |
+| **Forged** | The same stripping, then a false block: the date you choose on `DateTime`, `DateTimeOriginal` and `DateTimeDigitized` alike, `Make`/`Model` set to `Apple`/`iPhone 13`, and a location pinned to 48°52′36″S 123°23′36″W — Point Nemo, the most remote point in the ocean, picked precisely so the coordinates can never name a house. |
+
+The forged block is **built from nothing rather than copied and edited**, and that detail is the whole design. An EXIF block can carry a *thumbnail*, which is a small copy of the unredacted photo, so a spoofing pass that edited the original's tags would ship the face it had just covered inside the metadata. The tests assert the output holds exactly one JPEG stream and no thumbnail directory.
+
+What it is, and is not:
+
+- **It is false metadata, not the absence of metadata.** A missing block and a consistent one read differently to a tool that looks — that is a difference in suspicion, not proof either way.
+- **It is not anonymity.** The pixels are what identify a place and a person; all this removes is the file volunteering where and when it was taken.
+- **Most platforms strip EXIF on upload anyway.** It matters for files sent directly — email, chat, a USB stick, a shared folder.
+- **A `.tif` cannot carry the forged location.** Pillow only attaches a nested GPS directory through its own uncompressed writer, and libtiff rejects the offset it produces for a compressed one. Rather than change the archival format's encoding to plant a fake place, a spoofed TIFF has no location at all — the safer of the two outcomes.
+- **The default stays `Removed`.** Stamping a false date on a photo is a claim about evidence, so it is something you opt into, not something done for you.
 
 ### Presets
 
@@ -269,8 +302,8 @@ Detection is tens of milliseconds on a phone-sized photo, and a few hundred mill
 Two suites, no test framework, no fixtures to download:
 
 ```bash
-uv run python tests/test_engine.py   # 13/13 — detection, masking, colour, metadata, formats
-uv run python tests/test_api.py      # 13/13 — upload, tune, preview, render, download, disk
+uv run python tests/test_engine.py   # 17/17 — detection, masking, colour, metadata, formats
+uv run python tests/test_api.py      # 18/18 — upload, tune, preview, render, download, disk
 ```
 
 The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks.
@@ -281,7 +314,11 @@ Notable coverage:
 - Pixelate and blur **keep the photo's colours** and never composite against black.
 - Solid black writes pure black across the whole masked region.
 - Every facial landmark falls inside the mask.
-- Outputs carry no EXIF, GPS or camera metadata.
+- Outputs carry no EXIF, GPS or camera metadata by default, and the ICC profile survives.
+- Restoring one face leaves that face original **and** the others covered, checked against the same ellipse geometry the browser is handed.
+- Restoring everyone hands back the photo's own pixels, exactly — the lossless path in and out.
+- A forged block carries the chosen date on all three timestamp tags, the forged camera, a Point Nemo location and no thumbnail: a source file that arrives carrying a thumbnail of the original comes out with exactly one JPEG stream.
+- Only a box the detector actually found can be restored; repeating a click does not double-count, junk keys and indices are refused, and a rendered result is discarded when the visible set changes.
 - Changing settings invalidates a stale result.
 - The temp spool survives startup and a real multi-megabyte upload, and the orphan purge spares reserved folders.
 - A batch that loses all but one photo at render still hands that survivor back, as a plain image rather than a zip.
@@ -307,7 +344,7 @@ AmurCloak/
 │       ├── engine/
 │       │   ├── detector.py       # YuNet wrapper: tiling, NMS, ranking
 │       │   ├── redact.py         # ellipse geometry, three modes, audit map
-│       │   ├── photo.py          # decode/encode, EXIF, metadata stripping
+│       │   ├── photo.py          # decode/encode, EXIF, metadata policy
 │       │   ├── pipeline.py       # full-resolution preview composition
 │       │   ├── presets.py        # modes, presets, settings resolution
 │       │   ├── sessions.py       # staging, disk accounting, renderer, reaper
@@ -321,8 +358,8 @@ AmurCloak/
 │           └── app.js            # the whole front end, no build step
 ├── assets/                       # logo and screenshots
 └── tests/
-    ├── test_engine.py            # 12 tests
-    ├── test_api.py               # 11 tests
+    ├── test_engine.py            # 17 tests
+    ├── test_api.py               # 18 tests
     └── fixtures/                 # lena.jpg, plus fixtures built on demand
 ```
 
@@ -330,11 +367,12 @@ AmurCloak/
 
 ## Contributing
 
-This is a private tool, so there is no contribution process to speak of. If you do extend it, three rules keep it honest:
+This is a private tool, so there is no contribution process to speak of. If you do extend it, four rules keep it honest:
 
 1. **Nothing may make an outbound network call at runtime.** That is the entire point of the project. The one request AmurCloak ever makes is a loopback probe of its own port, to tell "already running" apart from "free port" — it is pinned to `127.0.0.1` and deliberately ignores any proxy set in the environment, so it cannot become an outbound request by accident.
-2. **A preview must never disagree with the delivered file.** Previews are composed at full resolution and only then downscaled — shrinking first would change the blur kernel and the block size.
+2. **A preview must never disagree with the delivered file.** Previews are composed at full resolution and only then downscaled — shrinking first would change the blur kernel and the block size. It is also why the preview and the export share one face list, restored faces included.
 3. **Never describe a reversible redaction as safe.** If a mode can be partially undone, the interface has to say so.
+4. **Build forged metadata from nothing; never edit the source's tags.** An EXIF block can carry a thumbnail, which is a small copy of the *original* photo — so the obvious "copy the tags and change a few" shortcut would ship the unredacted face inside the metadata of the file that covered it.
 
 Run both suites before committing; they are fast enough that there is no excuse not to.
 

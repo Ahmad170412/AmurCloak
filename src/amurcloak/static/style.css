@@ -439,6 +439,90 @@ h1, h2, h3, legend {
   object-fit: contain;
 }
 
+/* Click targets over the covered faces. The geometry comes from the server -
+   the same ellipse that was painted - so what you click is what was covered.
+   The layer itself is inert; only the marks take the pointer, which leaves the
+   rest of the picture behaving like a picture. */
+.face-layer {
+  position: absolute;
+  pointer-events: none;
+}
+
+.face-hit {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: center;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.face-hit:hover,
+.face-hit:focus-visible {
+  border-color: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.14);
+  outline: none;
+}
+
+/* A person the user chose to leave alone. Outlined for as long as they are
+   visible, because this is a decision, not a hover state - and the badge names
+   it, since a dashed ring alone could read as "still redacted". */
+.face-hit.is-visible {
+  border-color: var(--pine);
+  border-style: dashed;
+  background: rgba(63, 107, 82, 0.12);
+}
+
+.face-hit.is-visible::after {
+  content: "visible";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  /* Below the ring, not over the face: the whole reason to leave someone
+     visible is to see them, so the tag must not sit on top of what it labels. */
+  transform: translate(-50%, 5px);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--pine);
+  color: var(--snow);
+  font-family: var(--ui);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* A face near the bottom edge would push its tag out of the canvas, so there it
+   flips above the ring instead. */
+.face-hit.is-visible.is-low::after {
+  top: 0;
+  transform: translate(-50%, -100%) translateY(-5px);
+}
+
+.viewer-pick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.pick-hint {
+  margin: 0;
+  font-size: var(--step--1);
+  color: var(--slate-soft);
+}
+
+.btn-tiny {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  font-size: var(--step--1);
+}
+
 .viewer-loading {
   position: absolute;
   inset: 0;
@@ -572,6 +656,30 @@ h1, h2, h3, legend {
   font-size: var(--step--1);
   color: var(--slate-soft);
   line-height: 1.45;
+}
+
+.when-row {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.when-row > label {
+  font-size: var(--step--1);
+  color: var(--slate);
+  font-weight: 600;
+}
+
+.when-row input[type="datetime-local"] {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: var(--step--1);
+  color: var(--ink);
+  background: var(--snow);
+  border: var(--line);
+  border-radius: var(--radius);
 }
 
 input[type="range"] {

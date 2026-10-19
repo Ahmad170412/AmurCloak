@@ -145,6 +145,10 @@ class Item:
     meta: dict = field(default_factory=dict)
     width: int = 0
     height: int = 0
+    # Face keys the user clicked to leave visible. Per item, and never carried
+    # between photos: two people are only "the same person" to face recognition,
+    # which this tool deliberately does not do.
+    restored: set[tuple[int, int, int, int]] = field(default_factory=set)
 
     def to_dict(self) -> dict:
         return {
@@ -160,6 +164,7 @@ class Item:
             "meta": self.meta,
             "width": self.width,
             "height": self.height,
+            "restored": len(self.restored),
         }
 
 
@@ -255,6 +260,74 @@ class Session:
         with self.lock:
             self._detections.clear()
 
+    def covered(self, item: Item, detector: FaceDetector) -> list[Face]:
+        """The faces that will actually be masked: detections minus the restored.
+
+        Preview and render both go through here. One list, one truth: if the map
+        on screen and the file on disk could disagree about who is hidden, the
+        map would be worse than useless.
+        """
+        with self.lock:
+            restored = set(item.restored)
+        return [f for f in self.detections(item, detector) if f.key() not in restored]
+
+    def restored_faces(self, item: Item, detector: FaceDetector) -> list[Face]:
+        """Detections the user chose to leave visible. The complement of covered()."""
+        hidden = {f.key() for f in self.covered(item, detector)}
+        return [f for f in self.detections(item, detector) if f.key() not in hidden]
+
+    def set_restored(self, index: int, key: object, restore: bool) -> str | None:
+        """Leave one detected person visible, or cover them again. None on success.
+
+        The key is checked against the live detections rather than trusted, so a
+        stale or invented box cannot end up in the restore set. It also means the
+        only thing this can ever do is *un*-cover a face the detector already
+        found with the preset currently in force.
+        """
+        if not 0 <= index < len(self.items):
+            return "no such photo in this batch"
+        item = self.items[index]
+
+        if not isinstance(key, (list, tuple)) or len(key) != 4:
+            return "a face key must be four numbers"
+        try:
+            wanted = tuple(round(float(part)) for part in key)
+        except (TypeError, ValueError):
+            return "a face key must be four numbers"
+
+        with self.lock:
+            detected = self._detections.get(item.stored)
+        if detected is None:
+            # Nothing detected yet, so there is nothing to check the key against.
+            return "this photo has not been scanned yet"
+
+        if not any(face.key() == wanted for face in detected):
+            return "no such face in this photo"
+
+        with self.lock:
+            if restore:
+                item.restored.add(wanted)
+            else:
+                item.restored.discard(wanted)
+            self._drop_result_locked()
+        return None
+
+    def _drop_result_locked(self) -> None:
+        """Discard any rendered result. Caller holds the lock.
+
+        Shared by settings changes and face toggles, because both change what the
+        export would contain and neither may leave a stale download behind.
+        """
+        if self.rendered_with is None:
+            return
+        self.clear_outputs()
+        self.rendered_with = None
+        self.state = "staged"
+        self.progress = 0
+        for item in self.items:
+            if item.status == "done":
+                item.status = "staged"
+
     def apply_settings(self, new_settings: Settings) -> dict:
         """Swap in new settings, discarding any result they invalidate.
 
@@ -277,13 +350,7 @@ class Session:
             )
 
             if invalidated:
-                self.clear_outputs()
-                self.rendered_with = None
-                self.state = "staged"
-                self.progress = 0
-                for item in self.items:
-                    if item.status == "done":
-                        item.status = "staged"
+                self._drop_result_locked()
 
             self.touch()
             return {
@@ -566,7 +633,7 @@ class Renderer:
                 started = time.perf_counter()
                 try:
                     decoded = session.load_photo(item)
-                    faces = session.detections(item, detector)
+                    faces = session.covered(item, detector)
 
                     if item.out_name is None or item.out_name in taken:
                         item.out_name = photo_io.unique_output_name(
@@ -591,6 +658,8 @@ class Renderer:
                         decoded.icc if not session.settings.strip_exif else None,
                         quality=session.settings.quality,
                         keep_icc=not session.settings.strip_exif,
+                        metadata=session.settings.metadata,
+                        spoof_when=session.settings.spoof_when,
                     )
                     out_size = out_path.stat().st_size
 

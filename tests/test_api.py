@@ -19,6 +19,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -459,6 +460,283 @@ def t_preview_reflects_margin():
 
         require(tight["image"] != wide["image"], "preview ignored the margin change")
         require(wide["margin"] == 0.5, f"margin not echoed back: {wide['margin']}")
+    finally:
+        teardown(app, root)
+
+
+# ---------------------------------------------------------------------------
+# leaving one person visible
+# ---------------------------------------------------------------------------
+
+
+def build_pair_png() -> Path:
+    """Two faces, PNG, so the export's pixels can be compared exactly.
+
+    PNG is the lossless path in and out, which makes "no faces covered" a claim
+    worth testing literally rather than approximately.
+    """
+    gen = LENA.parent / "gen"
+    gen.mkdir(parents=True, exist_ok=True)
+    out = gen / "pair.png"
+    if out.exists():
+        return out
+    base = cv2.imread(str(LENA))
+    width = base.shape[1]
+    canvas = np.full((base.shape[0], width * 2, 3), 30, dtype=np.uint8)
+    canvas[:, :width] = base
+    canvas[:, width:] = base
+    cv2.imwrite(str(out), canvas)
+    return out
+
+
+def mean_inside(img: np.ndarray, mask: dict) -> tuple[float, int]:
+    """Brightness in the core of a published mask, and how many pixels that is.
+
+    Sampled at 60% of the published ellipse so the anti-aliased edge of the
+    painted mask never contributes. If the geometry the API hands the browser
+    were wrong, these numbers could not come out right.
+    """
+    m = np.zeros(img.shape[:2], dtype=np.uint8)
+    cv2.ellipse(
+        m,
+        (round(mask["cx"]), round(mask["cy"])),
+        (max(1, round(mask["ax"] * 0.6)), max(1, round(mask["ay"] * 0.6))),
+        mask["angle"],
+        0,
+        360,
+        255,
+        -1,
+    )
+    count = int((m > 0).sum())
+    if count == 0:
+        return float("nan"), 0
+    return float(img[m > 0].mean()), count
+
+
+@check("leaving one person visible keeps their pixels and covers the others")
+def t_restore_one():
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        response = upload(client, [build_group_photo()], {"mode": "black", "preset": "balanced"})
+        require(response.status_code == 201, "upload failed")
+        sid = response.get_json()["id"]
+
+        preview = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        faces = preview["faces"]
+        require(len(faces) >= 2, f"need at least two faces to tell apart, got {len(faces)}")
+        require(all(face["covered"] for face in faces), "everyone should start covered")
+        require(preview["restored"] == 0, "nothing should start visible")
+        require(preview["covered"] == len(faces), "the covered count is wrong")
+        require(all(face["mask"]["ax"] > 0 for face in faces), "faces need clickable geometry")
+
+        chosen = faces[0]
+        response = client.post(
+            f"/api/sessions/{sid}/faces",
+            json={"index": 0, "key": chosen["key"], "covered": False},
+        )
+        require(response.status_code == 200, response.get_data(as_text=True))
+
+        after = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        require(after["restored"] == 1, f"expected one person visible, got {after['restored']}")
+        require(after["covered"] == len(faces) - 1, "the covered count should drop by one")
+        marked = [face for face in after["faces"] if not face["covered"]]
+        require(len(marked) == 1, "exactly one face should be marked visible")
+        require(marked[0]["key"] == chosen["key"], "the wrong person was restored")
+
+        snapshot = render_and_wait(client, sid)
+        require(snapshot["state"] == "ready", f"render failed: {snapshot['error']}")
+        out = root / "one_kept.jpg"
+        out.write_bytes(client.get(f"/api/sessions/{sid}/result").data)
+        img = photo_io.load_photo(out).bgr
+
+        for entry in after["faces"]:
+            mean, count = mean_inside(img, entry["mask"])
+            require(count > 50, f"mask too small to judge ({count} px)")
+            if entry["covered"]:
+                require(mean < 12, f"a covered face came out lit (mean {mean:.1f})")
+            else:
+                require(mean > 40, f"the restored face was still redacted (mean {mean:.1f})")
+    finally:
+        teardown(app, root)
+
+
+@check("leaving everyone visible hands back the photo's own pixels")
+def t_restore_everyone():
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        pair = build_pair_png()
+        response = upload(client, [pair], {"mode": "black", "preset": "balanced"})
+        sid = response.get_json()["id"]
+
+        preview = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        faces = preview["faces"]
+        require(len(faces) == 2, f"expected the two faces, got {len(faces)}")
+
+        for face in faces:
+            response = client.post(
+                f"/api/sessions/{sid}/faces",
+                json={"index": 0, "key": face["key"], "covered": False},
+            )
+            require(response.status_code == 200, response.get_data(as_text=True))
+
+        after = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        require(after["restored"] == 2 and after["covered"] == 0, "everyone should be visible")
+
+        snapshot = render_and_wait(client, sid)
+        require(snapshot["state"] == "ready", f"render failed: {snapshot['error']}")
+        require(snapshot["result"]["name"].endswith(".png"), "a PNG input should stay a PNG")
+
+        out = root / "all_kept.png"
+        out.write_bytes(client.get(f"/api/sessions/{sid}/result").data)
+        require(
+            np.array_equal(photo_io.load_photo(out).bgr, photo_io.load_photo(pair).bgr),
+            "with nobody covered, the export should be the original pixels exactly",
+        )
+    finally:
+        teardown(app, root)
+
+
+@check("only a box the detector actually found can be restored")
+def t_face_toggle_guards():
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        sid = upload(client, [LENA], {"mode": "black"}).get_json()["id"]
+        faces_url = f"/api/sessions/{sid}/faces"
+
+        # Nothing has been detected yet, so there is nothing to check a key against.
+        response = client.post(faces_url, json={"index": 0, "key": [1, 2, 3, 4], "covered": False})
+        require(response.status_code == 400, "restoring before detection should be refused")
+
+        preview = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        key = preview["faces"][0]["key"]
+
+        refused = [
+            ({"index": 0, "key": [1, 2, 3, 4], "covered": False}, "an invented box"),
+            ({"index": 0, "key": [1, 2, 3], "covered": False}, "a short key"),
+            ({"index": 0, "key": key, "covered": "yes"}, "a non-boolean covered flag"),
+            ({"index": 99, "key": key, "covered": False}, "an out-of-range index"),
+            ({"key": key, "covered": False}, "a missing index"),
+            ({"index": 0, "covered": False}, "a missing key"),
+        ]
+        for body, label in refused:
+            response = client.post(faces_url, json=body)
+            require(response.status_code == 400, f"{label} was accepted: {response.status_code}")
+
+        ok = {"index": 0, "key": key, "covered": False}
+        require(client.post(faces_url, json=ok).status_code == 200, "a real face was refused")
+        require(
+            client.get(f"/api/sessions/{sid}/preview?index=0").get_json()["restored"] == 1,
+            "the first restore did not take",
+        )
+        # Idempotent: clicking the same person twice must not count them twice.
+        require(client.post(faces_url, json=ok).status_code == 200, "the retry was refused")
+        require(
+            client.get(f"/api/sessions/{sid}/preview?index=0").get_json()["restored"] == 1,
+            "a repeated restore was counted twice",
+        )
+        # And reversible.
+        require(
+            client.post(faces_url, json={**ok, "covered": True}).status_code == 200,
+            "covering the person again was refused",
+        )
+        require(
+            client.get(f"/api/sessions/{sid}/preview?index=0").get_json()["restored"] == 0,
+            "covering again did not clear the restore",
+        )
+    finally:
+        teardown(app, root)
+
+
+@check("restoring a face discards a result rendered before it")
+def t_restore_invalidates_result():
+    # Same rule as a settings change, for the same reason: handing over pixels
+    # that no longer match what the screen shows is a silent privacy failure.
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        sid = upload(client, [LENA], {"mode": "black"}).get_json()["id"]
+        preview = client.get(f"/api/sessions/{sid}/preview?index=0").get_json()
+        key = preview["faces"][0]["key"]
+
+        snapshot = render_and_wait(client, sid)
+        require(snapshot["result"]["ready"], "no result to invalidate")
+        # Note: no download here on purpose. A download is what frees the staged
+        # inputs, and with them the detections a restore is checked against - so
+        # the restore window closes exactly where the reason to use it does.
+
+        response = client.post(
+            f"/api/sessions/{sid}/faces",
+            json={"index": 0, "key": key, "covered": False},
+        )
+        require(response.status_code == 200, response.get_data(as_text=True))
+
+        after = client.get(f"/api/sessions/{sid}").get_json()
+        require(not after["result"]["ready"], "a stale result survived a restore")
+        require(after["state"] == "staged", f"state should be staged, got {after['state']}")
+        require(
+            client.get(f"/api/sessions/{sid}/result").status_code == 409,
+            "the stale file stayed downloadable",
+        )
+        # The detections must survive the invalidation, or nobody could undo it.
+        require(
+            client.post(
+                f"/api/sessions/{sid}/faces",
+                json={"index": 0, "key": key, "covered": True},
+            ).status_code
+            == 200,
+            "detections were lost when the result was dropped",
+        )
+    finally:
+        teardown(app, root)
+
+
+@check("forged metadata reaches the download, with no thumbnail")
+def t_spoof_end_to_end():
+    app, root = make_app()
+    try:
+        client = app.test_client()
+        response = upload(
+            client,
+            [build_group_photo()],
+            {"mode": "black", "metadata": "spoof", "spoof_when": "2024-07-01T09:30"},
+        )
+        require(response.status_code == 201, "upload failed")
+        snapshot = response.get_json()
+        sid = snapshot["id"]
+        require(snapshot["settings"]["metadata"] == "spoof", "the upload dropped the policy")
+        require(snapshot["settings"]["spoof_when"] == "2024-07-01T09:30", "the date was dropped")
+
+        # The tuning route has to carry it too, since that is how the UI changes it.
+        tuned = client.post(
+            f"/api/sessions/{sid}/settings",
+            json={"mode": "black", "metadata": "spoof", "spoof_when": "2024-07-01T09:30"},
+        ).get_json()
+        require(tuned["settings"]["spoof_when"] == "2024-07-01T09:30", "settings dropped the date")
+
+        snapshot = render_and_wait(client, sid)
+        require(snapshot["state"] == "ready", f"render failed: {snapshot['error']}")
+        out = root / "spoofed.jpg"
+        out.write_bytes(client.get(f"/api/sessions/{sid}/result").data)
+
+        exif = Image.open(out).getexif()
+        require(exif.get(0x0132) == "2024:07:01 09:30:00", f"date: {exif.get(0x0132)!r}")
+        require(exif.get(0x9003) == "2024:07:01 09:30:00", "DateTimeOriginal missing")
+        require(exif.get(0x9004) == "2024:07:01 09:30:00", "DateTimeDigitized missing")
+        require(exif.get(0x010F) == "Apple" and exif.get(0x0110) == "iPhone 13", "camera missing")
+        require(exif.get_ifd(0x8825).get(1) == "S", "the forged location is not Point Nemo")
+        require(0x0201 not in exif and dict(exif.get_ifd(1)) == {}, "a thumbnail was written")
+
+        probe = photo_io.probe_metadata(out)
+        require(probe["has_gps"], "the probe should see the forged location")
+        require(probe["camera"] == "Apple iPhone 13", f"camera: {probe['camera']!r}")
+        require(probe["datetime"] == "2024:07:01 09:30:00", f"datetime: {probe['datetime']!r}")
+
+        # And the point of the tool still holds: the faces are gone.
+        img = photo_io.load_photo(out).bgr
+        require((img.sum(axis=2) == 0).any(), "the redaction was lost while forging metadata")
     finally:
         teardown(app, root)
 
