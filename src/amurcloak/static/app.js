@@ -8,13 +8,13 @@
   const $ = (sel) => document.querySelector(sel);
 
   const el = {
+    themeToggle: $("#theme-toggle"),
     dropzone: $("#dropzone"),
     viewer: $("#viewer"),
     canvas: $("#viewer-canvas"),
     previewImg: $("#preview-img"),
     viewerLoading: $("#viewer-loading"),
     faceLayer: $("#face-layer"),
-    viewerPick: $("#viewer-pick"),
     pickHint: $("#pick-hint"),
     coverAll: $("#cover-all"),
     viewerName: $("#viewer-name"),
@@ -22,6 +22,7 @@
     viewerNote: $("#viewer-note"),
     fileList: $("#file-list"),
     filesNote: $("#files-note"),
+    railCount: $("#rail-count"),
     modeOptions: $("#mode-options"),
     modeNote: $("#mode-note"),
     presetOptions: $("#preset-options"),
@@ -38,6 +39,7 @@
     metadataFlag: $("#metadata-flag"),
     renderBtn: $("#render-btn"),
     downloadBtn: $("#download-btn"),
+    redactAgain: $("#redact-again"),
     resetBtn: $("#reset-btn"),
     progress: $("#progress"),
     progressFill: $("#progress-fill"),
@@ -79,6 +81,48 @@
     pollTimer: null,
     settingsTimer: null,
   };
+
+  /* ── theme ─────────────────────────────────────────────────────
+     The head script has already committed to a theme before the first paint,
+     so this only mirrors that onto the button and remembers a deliberate
+     choice. Until there is one, the page keeps following the OS. */
+
+  const THEME_KEY = "amurcloak-theme";
+
+  function storedTheme() {
+    try {
+      return localStorage.getItem(THEME_KEY);
+    } catch {
+      return null; // storage disabled
+    }
+  }
+
+  function paintTheme(dark) {
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    el.themeToggle.setAttribute("aria-pressed", String(dark));
+    el.themeToggle.title = dark ? "Switch to the light theme" : "Switch to the dark theme";
+  }
+
+  function wireTheme() {
+    paintTheme(document.documentElement.dataset.theme === "dark");
+
+    el.themeToggle.addEventListener("click", () => {
+      const dark = document.documentElement.dataset.theme !== "dark";
+      try {
+        localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
+      } catch {
+        // A choice we cannot store is still a choice for this visit.
+      }
+      paintTheme(dark);
+    });
+
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    if (query.addEventListener) {
+      query.addEventListener("change", (event) => {
+        if (!storedTheme()) paintTheme(event.matches);
+      });
+    }
+  }
 
   /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -394,11 +438,14 @@
     el.faceLayer.hidden = false;
   }
 
+  // The strip itself stays in the layout whether or not it has anything to
+  // say: the canvas is measured off what is left over, so a strip that came and
+  // went would resize the picture between a photo with faces and one without.
   function hideFaces() {
     state.faces = [];
     el.faceLayer.innerHTML = "";
     el.faceLayer.hidden = true;
-    el.viewerPick.hidden = true;
+    el.pickHint.textContent = "";
     el.coverAll.hidden = true;
   }
 
@@ -418,7 +465,7 @@
 
     if (!faces.length || !width || !height) {
       el.faceLayer.hidden = true;
-      el.viewerPick.hidden = true;
+      el.pickHint.textContent = "";
       el.coverAll.hidden = true;
       return;
     }
@@ -447,7 +494,6 @@
     }
 
     const restored = faces.filter((face) => !face.covered).length;
-    el.viewerPick.hidden = false;
     el.pickHint.textContent = pickHint(restored);
     el.coverAll.hidden = restored === 0;
     syncFaceLayer();
@@ -524,6 +570,9 @@
 
   function renderFiles() {
     const snapshot = state.snapshot;
+    const count = snapshot && snapshot.items.length ? snapshot.items.length : state.pending.length;
+    el.railCount.hidden = count === 0;
+    el.railCount.textContent = count ? String(count) : "";
     if (!snapshot || !snapshot.items.length) {
       if (state.pending.length) {
         renderPendingRows();
@@ -653,11 +702,10 @@
         )
       );
     }
-    el.metadataFlag.textContent =
-      `Heads up: ${bits.join(" and ")}. ` +
-      (state.settings.metadata === "spoof"
-        ? "The redacted copies replace all of it with a deliberately false timestamp, a made-up camera and a location in the emptiest stretch of the Pacific."
-        : "All of it is stripped from the redacted copies, along with any timestamps.");
+    // Deliberately says nothing about the policy. What happens to the metadata
+    // is answered by the note under the control it belongs to, and a line here
+    // that grew and shrank with the policy would shove that control around.
+    el.metadataFlag.textContent = `Heads up: ${bits.join(" and ")}.`;
   }
 
   function renderActions() {
@@ -667,6 +715,7 @@
 
     el.renderBtn.hidden = false;
     el.downloadBtn.hidden = true;
+    el.redactAgain.hidden = true;
     el.progress.hidden = true;
     el.renderBtn.disabled = !hasItems || renderable === 0 || state.busy;
 
@@ -692,12 +741,16 @@
     if (snapshot.state === "ready" && snapshot.result.ready) {
       const count = snapshot.items.filter((i) => i.status === "done").length;
       const freed = Boolean(snapshot.disk && snapshot.disk.inputs_freed);
+      // One primary at a time, and it is whichever comes next. Download takes
+      // the slot Redact just vacated instead of stacking a second amber button,
+      // so the eye is never asked which of two equals to press.
+      el.renderBtn.hidden = true;
       el.downloadBtn.hidden = false;
       el.downloadBtn.textContent = `Download ${count} ${plural(count, "photo", "photos")}`;
-      el.renderBtn.textContent = "Redact again";
       // Re-rendering reads the staged copies. Once those have been freed there
       // is nothing left to read, and the button would only produce an error.
-      el.renderBtn.disabled = state.busy || freed;
+      el.redactAgain.hidden = false;
+      el.redactAgain.disabled = state.busy || freed;
       el.actionNote.textContent = snapshot.downloaded
         ? "Staged copies were freed to reclaim space. Drop the photos again to redact them differently."
         : `Output is ${formatBytes(snapshot.result.size)}. Staged copies are freed once you download.`;
@@ -1114,6 +1167,7 @@
     }
 
     el.renderBtn.addEventListener("click", startRender);
+    el.redactAgain.addEventListener("click", startRender);
     el.downloadBtn.addEventListener("click", download);
     el.resetBtn.addEventListener("click", () => reset());
 
@@ -1199,5 +1253,6 @@
     }
   }
 
+  wireTheme();
   boot();
 })();

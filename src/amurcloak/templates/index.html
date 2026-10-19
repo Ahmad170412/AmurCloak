@@ -3,8 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="light dark">
 <title>AmurCloak</title>
+<script>
+  // Settled before the first paint so the page never flashes the wrong theme.
+  // No request and no dependency: the OS preference plus one stored choice.
+  (() => {
+    let saved = null;
+    try {
+      saved = localStorage.getItem("amurcloak-theme");
+    } catch {
+      saved = null; // storage disabled, so follow the system
+    }
+    const dark = saved
+      ? saved === "dark"
+      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+</script>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_v) }}">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23F7F9FA'/><g fill='%23C97A2B' transform='rotate(-12 16 16)'><rect x='7' y='8' width='3.2' height='16' rx='1.6'/><rect x='13' y='5' width='3.2' height='22' rx='1.6' opacity='.7'/><rect x='19' y='10' width='3.2' height='12' rx='1.6' opacity='.45'/></g></svg>">
 </head>
@@ -21,15 +37,31 @@
     </svg>
     <span class="wordmark">AmurCloak</span>
   </div>
+  <button
+    type="button"
+    class="theme-toggle"
+    id="theme-toggle"
+    aria-pressed="false"
+    aria-label="Dark theme"
+  >
+    <svg class="ico ico-moon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M17 11.6A7 7 0 0 1 8.4 3a7.2 7.2 0 1 0 8.6 8.6Z"/>
+    </svg>
+    <svg class="ico ico-sun" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="3.4"/>
+      <path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/>
+    </svg>
+  </button>
 </header>
 
 <main class="workspace" id="workspace">
 
-  <!-- ── the photos: what is staged, how hard to look, and the action ── -->
+  <!-- ── the photos, and the one button that finishes the job ── -->
   <aside class="rail rail-photos" aria-label="Photos">
 
     <div class="rail-head">
       <h2>Photos</h2>
+      <span class="rail-count tabnum" id="rail-count" hidden></span>
     </div>
 
     <div class="rail-scroll">
@@ -37,26 +69,23 @@
       <p class="rail-note" id="files-note">Nothing staged yet.</p>
     </div>
 
+    <!-- The foot is the one thing that must not move. Redact, the progress bar
+         and Download all take the same slot, and the quiet row below never
+         changes height, so the button stays where your cursor left it. -->
     <div class="rail-foot">
-
-      <fieldset class="group" id="group-scan">
-        <legend>Faces to find</legend>
-        <div class="segmented segmented-wide" id="preset-options" role="group" aria-label="How hard to look for faces"></div>
-      </fieldset>
-
-      <div class="metadata-flag" id="metadata-flag" hidden></div>
-
-      <div class="actions" id="actions">
+      <div class="action-slot">
         <button type="button" class="btn btn-primary btn-wide" id="render-btn" disabled>Redact photos</button>
         <button type="button" class="btn btn-primary btn-wide" id="download-btn" hidden>Download</button>
         <div class="progress" id="progress" hidden>
           <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
           <p class="progress-text" id="progress-text" aria-live="polite"></p>
         </div>
-        <p class="action-note" id="action-note"></p>
-        <button type="button" class="btn btn-quiet" id="reset-btn" hidden>Remove these photos</button>
       </div>
-
+      <p class="action-note" id="action-note"></p>
+      <div class="action-quiet">
+        <button type="button" class="btn btn-quiet btn-tiny" id="redact-again" hidden>Redact again</button>
+        <button type="button" class="btn btn-quiet btn-tiny" id="reset-btn" hidden>Remove photos</button>
+      </div>
     </div>
   </aside>
 
@@ -107,7 +136,7 @@
         <div class="face-layer" id="face-layer" hidden></div>
         <div class="viewer-loading" id="viewer-loading" hidden></div>
       </div>
-      <div class="viewer-pick" id="viewer-pick" hidden>
+      <div class="viewer-pick" id="viewer-pick">
         <p class="pick-hint" id="pick-hint"></p>
         <button type="button" class="btn btn-quiet btn-tiny" id="cover-all" hidden>Cover everyone again</button>
       </div>
@@ -116,7 +145,7 @@
 
   </section>
 
-  <!-- ── the mask: how the cover looks, and the disk it costs ── -->
+  <!-- ── the mask: every setting that shapes the redacted copy ── -->
   <aside class="rail rail-mask" aria-label="Redaction">
 
     <div class="rail-head">
@@ -124,6 +153,11 @@
     </div>
 
     <div class="rail-scroll">
+
+      <fieldset class="group" id="group-scan">
+        <legend>Faces to find</legend>
+        <div class="segmented segmented-wide" id="preset-options" role="group" aria-label="How hard to look for faces"></div>
+      </fieldset>
 
       <fieldset class="group" id="group-mode">
         <legend>Cover</legend>
@@ -152,6 +186,7 @@
       <fieldset class="group" id="group-metadata">
         <legend>Metadata</legend>
         <div class="segmented segmented-wide" id="metadata-options" role="group" aria-label="What the exported file claims"></div>
+        <div class="metadata-flag" id="metadata-flag" hidden></div>
         <div class="when-row" id="when-row" hidden>
           <label for="spoof-when">Date it claims</label>
           <input type="datetime-local" id="spoof-when" step="60">

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -739,6 +740,127 @@ def t_spoof_end_to_end():
         # And the point of the tool still holds: the faces are gone.
         img = photo_io.load_photo(out).bgr
         require((img.sum(axis=2) == 0).any(), "the redaction was lost while forging metadata")
+    finally:
+        teardown(app, root)
+
+
+# ---------------------------------------------------------------------------
+# The three front-end files have to agree with each other. Nothing catches a
+# half-finished rename for us - the page still loads, it just quietly loses a
+# control or drops a rail into the wrong grid cell - so check them against each
+# other rather than by eye.
+
+
+def front_end_assets():
+    app, root = make_app()
+    client = app.test_client()
+    return (
+        app,
+        root,
+        client.get("/").get_data(as_text=True),
+        client.get("/static/app.js").get_data(as_text=True),
+        client.get("/static/style.css").get_data(as_text=True),
+    )
+
+
+@check("every id the controller queries exists in the page")
+def t_frontend_ids_line_up():
+    app, root, html, js, _css = front_end_assets()
+    try:
+        looked_up = set(re.findall(r'\$\("#([a-z0-9-]+)"\)', js))
+        require(
+            len(looked_up) > 20,
+            f"only found {len(looked_up)} lookups - did app.js change shape?",
+        )
+        missing = sorted(i for i in looked_up if f'id="{i}"' not in html)
+        require(not missing, f"app.js queries ids the page does not define: {missing}")
+    finally:
+        teardown(app, root)
+
+
+@check("every column the workspace declares is filled by a pane the page uses")
+def t_frontend_grid_areas_are_filled():
+    app, root, html, _js, css = front_end_assets()
+    try:
+        declared: set[str] = set()
+        for rule in re.finditer(r"\.workspace\s*\{([^}]*)\}", css):
+            for chunk in re.findall(r'grid-template-areas:\s*((?:"[^"]*"\s*)+)', rule.group(1)):
+                for row in re.findall(r'"([^"]+)"', chunk):
+                    declared.update(row.split())
+        require(declared == {"batch", "stage", "mask"}, f"unexpected areas: {sorted(declared)}")
+
+        claimed: dict[str, set[str]] = {}
+        for rule in re.finditer(r"\.([a-z][a-z0-9-]*)\s*\{([^}]*)\}", css):
+            area = re.search(r"grid-area:\s*([a-z][a-z0-9-]*)", rule.group(2))
+            if area:
+                claimed.setdefault(area.group(1), set()).add(rule.group(1))
+
+        for area in sorted(declared):
+            classes = claimed.get(area, set())
+            require(classes, f"the workspace declares a {area!r} column that no rule fills")
+            require(
+                any(name in html for name in classes),
+                f"the {area!r} column is claimed by {sorted(classes)}, none of which the page uses",
+            )
+    finally:
+        teardown(app, root)
+
+
+@check("the theme is settled before the first paint and in one place")
+def t_theme_boots_before_the_first_paint():
+    app, root, html, _js, _css = front_end_assets()
+    try:
+        script_at = html.find("amurcloak-theme")
+        link_at = html.find("style.css")
+        require(script_at != -1, "nothing on the page decides the theme")
+        require(link_at != -1, "the stylesheet is not linked from the page")
+        require(
+            script_at < link_at,
+            "the theme must be decided before the stylesheet, or the page flashes",
+        )
+        require('id="theme-toggle"' in html, "there is no way to change the theme")
+        require('aria-pressed' in html, "the toggle does not expose its state")
+        require(
+            'content="light dark"' in html,
+            "the page should tell the browser both schemes are legitimate",
+        )
+    finally:
+        teardown(app, root)
+
+
+@check("every custom property the stylesheet uses is defined, and dark overrides only")
+def t_css_tokens_are_all_defined():
+    app, root, _html, _js, css = front_end_assets()
+    try:
+        used = set(re.findall(r"var\((--[a-z0-9-]+)\)", css))
+        defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+        missing = sorted(used - defined)
+        require(not missing, f"custom properties used but never defined: {missing}")
+
+        # The dark block is an override list. A token only it defines would be
+        # undefined in the light theme, and a fallback would hide that forever.
+        block_at = css.find(':root[data-theme="dark"]')
+        require(block_at != -1, "there is no dark theme block")
+        open_at = css.index("{", block_at)
+        depth = 0
+        dark_block = ""
+        for index in range(open_at, len(css)):
+            if css[index] == "{":
+                depth += 1
+            elif css[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    dark_block = css[open_at:index]
+                    break
+        require(dark_block, "the dark theme block is empty")
+        dark_tokens = set(re.findall(r"(--[a-z0-9-]+)\s*:", dark_block))
+        light_tokens = set(re.findall(r"(--[a-z0-9-]+)\s*:", css[:block_at]))
+        only_dark = sorted(dark_tokens - light_tokens)
+        require(not only_dark, f"tokens defined only for the dark theme: {only_dark}")
+        require(
+            len(dark_tokens) > 15,
+            f"only {len(dark_tokens)} tokens in the dark theme - is it still an override list?",
+        )
     finally:
         teardown(app, root)
 

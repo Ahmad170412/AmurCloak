@@ -11,7 +11,7 @@ No uploads, no accounts, no telemetry. Drop photos in, check the map, download r
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-36%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-40%20passing-3f6b52)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
@@ -41,6 +41,10 @@ The default mode, next to the two softer ones — so the trade-off is visible ra
 The **audit map** shows you what was found before you commit to anything. If a face is visible here, you know it is covered; if someone is missed, you can see that too and switch to a more aggressive preset:
 
 ![The AmurCloak interface showing the audit map.](assets/screenshot-app.png)
+
+The same workspace after dark, switched to the result view. It follows your system until you choose a side, remembers the choice, and settles the theme before the first paint so the page never flashes the wrong one:
+
+![The same interface in dark mode, showing the result view.](assets/screenshot-dark.png)
 
 ---
 
@@ -133,6 +137,7 @@ A single process, one request at a time, no queue and no worker pool:
 | **Metadata stripping** | EXIF, XMP, IPTC and GPS are dropped by default. The ICC profile is kept, so iPhone Display P3 colours survive. |
 | **Leave one person visible** | Click any covered face in the preview to give that person their pixels back — the person waving behind the birthday cake stays in the photo. Per photo, and never matched across a batch. |
 | **Forged metadata (opt-in)** | Leave stripped, or write a deliberately false block instead: a chosen date on all three timestamp tags, a made-up camera, and a location fixed to the emptiest point in the Pacific — built from nothing, so no thumbnail and no maker notes from the original can tag along. |
+| **Light and dark** | One workspace at two exposures, chosen with the toggle in the top bar. It follows your system until you pick a side, then remembers. The theme is settled before the first paint, so there is no flash, and every text-on-background pair in both themes clears WCAG AA. |
 | **HEIC support** | iPhone photos work directly, via `pillow-heif`. |
 | **Nine input formats** | BMP, HEIC, HEIF, JPEG, PNG, TIFF, WebP — outputs keep the original format. |
 | **Streaming batches** | Outputs are appended to a `ZIP_STORED` archive and unlinked as they go, so a batch never exists twice on disk. |
@@ -242,6 +247,8 @@ An upload that will not fit is refused **before** anything is written, and the e
 
 ### The interface
 
+The page is three columns and the rule never changes: your **photos and the export button** on the left, the **picture** in the middle, and **every setting** on the right, in the order you would reach for them — how hard to look, how to cover, how wide, and what the file claims. The left column's button is the only primary action, and it stays put: it becomes Redact, then the progress bar, then Download, in the same place every time.
+
 1. **Drop photos** anywhere on the page, paste a screenshot, or click **Choose photos**.
 2. **Check the audit map.** Every detection is numbered and scored. Switch to **Result** to see the actual redaction.
 3. **Leave someone visible, if you want to.** Click a covered face to give that person their pixels back; click again to cover them.
@@ -305,10 +312,10 @@ Two suites, no test framework, no fixtures to download:
 
 ```bash
 uv run python tests/test_engine.py   # 18/18 — detection, masking, colour, metadata, formats
-uv run python tests/test_api.py      # 18/18 — upload, tune, preview, render, download, disk
+uv run python tests/test_api.py      # 22/22 — upload, tune, preview, render, download, disk
 ```
 
-The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks.
+The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks. Its last four checks fetch the page, the script and the stylesheet and compare them against each other.
 
 Notable coverage:
 
@@ -326,8 +333,9 @@ Notable coverage:
 - The temp spool survives startup and a real multi-megabyte upload, and the orphan purge spares reserved folders.
 - A batch that loses all but one photo at render still hands that survivor back, as a plain image rather than a zip.
 - A non-finite slider value degrades to the default instead of reaching the mask geometry.
+- The page, the script and the stylesheet agree with each other: every id the controller queries exists in the markup, every column the workspace declares is filled by a pane the page actually uses, the theme is decided before the stylesheet so it cannot flash, and no custom property is used without being defined — and none is defined only for the dark theme.
 
-Several of these exist because they were real bugs: an upload that silently failed with a 500, a purge that deleted the directory Werkzeug spools uploads into, a batch that reported "ready" with no file behind it, and a `"nan"` margin that could have reached the ellipse maths.
+Several of these exist because they were real bugs: an upload that silently failed with a 500, a purge that deleted the directory Werkzeug spools uploads into, a batch that reported "ready" with no file behind it, a `"nan"` margin that could have reached the ellipse maths, and a renamed pane whose stylesheet kept the old class name — which cost the rail its grid area and its divider without a single error being raised.
 
 ---
 
@@ -357,12 +365,12 @@ AmurCloak/
 │       ├── templates/
 │       │   └── index.html        # the single page
 │       └── static/
-│           ├── style.css         # the whole stylesheet
+│           ├── style.css         # the whole stylesheet, both themes as tokens
 │           └── app.js            # the whole front end, no build step
 ├── assets/                       # logo and screenshots
 └── tests/
-    ├── test_engine.py            # 17 tests
-    ├── test_api.py               # 18 tests
+    ├── test_engine.py            # 18 tests
+    ├── test_api.py               # 22 tests
     └── fixtures/                 # lena.jpg, plus fixtures built on demand
 ```
 
@@ -370,14 +378,14 @@ AmurCloak/
 
 ## Contributing
 
-This is a private tool, so there is no contribution process to speak of. If you do extend it, four rules keep it honest:
+This is a private tool, so there is no contribution process to speak of. If you do extend it, six rules keep it honest:
 
 1. **Nothing may make an outbound network call at runtime.** That is the entire point of the project. The one request AmurCloak ever makes is a loopback probe of its own port, to tell "already running" apart from "free port" — it is pinned to `127.0.0.1` and deliberately ignores any proxy set in the environment, so it cannot become an outbound request by accident.
 2. **A preview must never disagree with the delivered file.** Previews are composed at full resolution and only then downscaled — shrinking first would change the blur kernel and the block size. It is also why the preview and the export share one face list, restored faces included.
 3. **Never describe a reversible redaction as safe.** If a mode can be partially undone, the interface has to say so.
 4. **Build forged metadata from nothing; never edit the source's tags.** An EXIF block can carry a thumbnail, which is a small copy of the *original* photo — so the obvious "copy the tags and change a few" shortcut would ship the unredacted face inside the metadata of the file that covered it.
-
 5. **Whatever the forged block claims, make it agree with itself.** A block that is merely sparse is a poor forgery, and a block that contradicts itself is a worse one: derive the APEX shutter and aperture values from the exposure time and f-number instead of guessing them, and record the dimensions of the image you actually wrote.
+6. **Keep `index.html`, `style.css` and `app.js` in agreement, and let the tests hold you to it.** This front end has no build step, so nothing checks the seams: rename a pane, miss one of the three files, and the page still loads — it just quietly loses a control, or a rail loses the grid area that held it in place. The API suite compares the three files against each other for exactly that reason, and is the cheapest way to find out you renamed something twice.
 
 Run both suites before committing; they are fast enough that there is no excuse not to.
 
