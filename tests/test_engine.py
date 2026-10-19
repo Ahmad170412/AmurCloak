@@ -369,12 +369,32 @@ def t_payload_rejects_non_finite():
 TAG_MAKE = 0x010F
 TAG_MODEL = 0x0110
 TAG_ORIENTATION = 0x0112
+TAG_X_RESOLUTION = 0x011A
+TAG_Y_RESOLUTION = 0x011B
+TAG_RESOLUTION_UNIT = 0x0128
 TAG_DATETIME = 0x0132
 TAG_THUMB_OFFSET = 0x0201
 TAG_THUMB_LENGTH = 0x0202
+TAG_YCBCR_POSITIONING = 0x0213
 TAG_DATETIME_ORIGINAL = 0x9003
 TAG_DATETIME_DIGITIZED = 0x9004
 TAG_GPS_IFD = 0x8825
+TAG_EXIF_IFD = 0x8769
+
+# Tags that live in the Exif sub-directory.
+TAG_EXPOSURE_TIME = 0x829A
+TAG_FNUMBER = 0x829D
+TAG_ISO = 0x8827
+TAG_EXIF_VERSION = 0x9000
+TAG_SHUTTER_APEX = 0x9201
+TAG_APERTURE_APEX = 0x9202
+TAG_FOCAL_LENGTH = 0x920A
+TAG_COLOR_SPACE = 0xA001
+TAG_PIXEL_X = 0xA002
+TAG_PIXEL_Y = 0xA003
+TAG_FOCAL_35MM = 0xA405
+TAG_LENS_MAKE = 0xA433
+TAG_LENS_MODEL = 0xA434
 
 POINT_NEMO = ([48.0, 52.0, 36.0], [123.0, 23.0, 36.0])
 
@@ -448,6 +468,7 @@ def gps_degrees(gps: dict) -> tuple[list[float], list[float]]:
 
 @check("spoofed output carries one consistent, thumbnail-free EXIF block")
 def t_spoof_forges_the_block():
+    height, width = lena_bgr().shape[:2]
     for ext in (".jpg", ".png", ".tif"):
         path = GEN / f"spoofed{ext}"
         photo.save_photo(
@@ -463,16 +484,20 @@ def t_spoof_forges_the_block():
             exif = out.getexif()
             require("xmp" not in out.info, f"{ext}: XMP was written")
 
-        # All three timestamps agree. A file where they disagree announces that
-        # it was edited, which defeats the point of forging them.
+        # A container that can hold nested directories carries all three
+        # timestamps the proper way, in the Exif IFD. A compressed TIFF cannot,
+        # so it keeps them in IFD0 instead.
+        nested = ext not in (".tif", ".tiff")
+        sub = exif.get_ifd(TAG_EXIF_IFD) if nested else exif
         for tag, label in (
             (TAG_DATETIME, "DateTime"),
             (TAG_DATETIME_ORIGINAL, "DateTimeOriginal"),
             (TAG_DATETIME_DIGITIZED, "DateTimeDigitized"),
         ):
+            holder = exif if tag == TAG_DATETIME else sub
             require(
-                exif.get(tag) == "1453:05:05 06:00:00",
-                f"{ext}: {label} was {exif.get(tag)!r}",
+                holder.get(tag) == "1453:05:05 06:00:00",
+                f"{ext}: {label} was {holder.get(tag)!r}",
             )
         require(exif.get(TAG_MAKE) == "Apple", f"{ext}: make was {exif.get(TAG_MAKE)!r}")
         require(exif.get(TAG_MODEL) == "iPhone 13", f"{ext}: model was {exif.get(TAG_MODEL)!r}")
@@ -480,23 +505,112 @@ def t_spoof_forges_the_block():
             exif.get(TAG_ORIENTATION) == 1,
             f"{ext}: orientation must be 1 so the upright pixels stay upright",
         )
+        # A camera states its own resolution; a block missing it was written by a
+        # script, which is half of what makes the forged version pass.
+        require(exif.get(TAG_X_RESOLUTION) == 72, f"{ext}: XResolution missing")
+        require(exif.get(TAG_Y_RESOLUTION) == 72, f"{ext}: YResolution missing")
+        require(exif.get(TAG_RESOLUTION_UNIT) == 2, f"{ext}: ResolutionUnit missing")
+        require(exif.get(TAG_YCBCR_POSITIONING) == 1, f"{ext}: YCbCrPositioning missing")
 
         gps = exif.get_ifd(TAG_GPS_IFD)
-        if ext in (".tif", ".tiff"):
-            # Documented exception: a compressed TIFF cannot carry a nested GPS
-            # directory (libtiff rejects Pillow's offset), and changing the
-            # archival format's encoding to plant a fake place is not worth it.
-            require(not gps, f"{ext}: a compressed TIFF should carry no GPS at all")
-        else:
+        if nested:
+            require(dict(sub) != {}, f"{ext}: the Exif sub-directory was not written")
+            require(sub.get(TAG_EXIF_VERSION) == b"0232", f"{ext}: ExifVersion missing")
+            require(sub.get(TAG_ISO), f"{ext}: ISO missing")
+            require(sub.get(TAG_FNUMBER), f"{ext}: FNumber missing")
+            require(sub.get(TAG_EXPOSURE_TIME), f"{ext}: ExposureTime missing")
+            require(
+                "iPhone 13" in str(sub.get(TAG_LENS_MODEL)),
+                f"{ext}: LensModel was {sub.get(TAG_LENS_MODEL)!r}",
+            )
+            require(sub.get(TAG_LENS_MAKE) == "Apple", f"{ext}: LensMake missing")
+            require(
+                sub.get(TAG_PIXEL_X) == width and sub.get(TAG_PIXEL_Y) == height,
+                f"{ext}: Exif pixels {sub.get(TAG_PIXEL_X)}x{sub.get(TAG_PIXEL_Y)} "
+                f"do not match the {width}x{height} image",
+            )
             lat, lon = gps_degrees(gps)
             require(lat == POINT_NEMO[0], f"{ext}: latitude was {lat}")
             require(lon == POINT_NEMO[1], f"{ext}: longitude was {lon}")
             require(gps.get(1) == "S" and gps.get(3) == "W", f"{ext}: hemisphere refs missing")
             require(gps.get(0x001D) == "1453:05:05", f"{ext}: GPS date was {gps.get(0x001D)!r}")
+        else:
+            # Documented exception: Pillow attaches a nested directory only
+            # through its own uncompressed writer, and libtiff rejects the offset
+            # it emits for a compressed file - for EXIFIFDOffset just as much as
+            # for GPSIFDOffset. Changing the archival format's encoding to plant a
+            # fake place is not worth it, so a spoofed TIFF stays flat: the
+            # camera, the resolution and the timestamps, and nothing deeper.
+            require(not gps, f"{ext}: a compressed TIFF should carry no GPS at all")
+            require(
+                dict(exif.get_ifd(TAG_EXIF_IFD)) == {},
+                f"{ext}: a compressed TIFF should carry no Exif sub-directory",
+            )
 
         require(TAG_THUMB_OFFSET not in exif, f"{ext}: thumbnail pointer present")
         require(TAG_THUMB_LENGTH not in exif, f"{ext}: thumbnail length present")
         require(dict(exif.get_ifd(1)) == {}, f"{ext}: an IFD1 thumbnail directory was written")
+
+
+@check("the forged block reads as a real capture, not an empty stub")
+def t_spoof_looks_like_a_real_capture():
+    path = GEN / "spoofed_plausible.jpg"
+    photo.save_photo(
+        path,
+        lena_bgr(),
+        None,
+        None,
+        quality=95,
+        metadata="spoof",
+        spoof_when="2024-07-01T09:30",
+    )
+    height, width = lena_bgr().shape[:2]
+    with Image.open(path) as out:
+        exif = out.getexif()
+        sub = exif.get_ifd(TAG_EXIF_IFD)
+
+    # The point of the exercise: everything a viewer asks about the shot is
+    # answered, so nothing stands out as missing.
+    for tag, label in (
+        (TAG_EXIF_VERSION, "ExifVersion"),
+        (TAG_ISO, "ISO"),
+        (TAG_FNUMBER, "FNumber"),
+        (TAG_EXPOSURE_TIME, "ExposureTime"),
+        (TAG_SHUTTER_APEX, "ShutterSpeedValue"),
+        (TAG_APERTURE_APEX, "ApertureValue"),
+        (TAG_FOCAL_LENGTH, "FocalLength"),
+        (TAG_FOCAL_35MM, "FocalLengthIn35mmFormat"),
+        (TAG_COLOR_SPACE, "ColorSpace"),
+        (TAG_LENS_MAKE, "LensMake"),
+        (TAG_LENS_MODEL, "LensModel"),
+        (TAG_PIXEL_X, "PixelXDimension"),
+        (TAG_PIXEL_Y, "PixelYDimension"),
+    ):
+        require(sub.get(tag) is not None, f"{label} is missing from the forged block")
+
+    require(sub.get(TAG_PIXEL_X) == width, "the recorded width is not the written width")
+    require(sub.get(TAG_PIXEL_Y) == height, "the recorded height is not the written height")
+    require(sub.get(TAG_COLOR_SPACE) == 65535, "an iPhone reports uncalibrated colour")
+    require(sub.get(TAG_FOCAL_35MM) == 26, "the iPhone 13 wide lens is 26mm equivalent")
+
+    # Self-consistency is the whole game. APEX stores shutter and aperture on a
+    # log2 scale, so these have to be derived from ExposureTime and FNumber -
+    # a block whose stated aperture and computed aperture disagree contradicts
+    # itself, and that is the loudest thing a forgery can carry.
+    exposure = float(sub.get(TAG_EXPOSURE_TIME))
+    require(exposure > 0, "exposure time must be positive")
+    require(
+        abs(2.0 ** (-float(sub.get(TAG_SHUTTER_APEX))) - exposure) < 1e-3,
+        "ShutterSpeedValue does not agree with ExposureTime",
+    )
+    fnumber = float(sub.get(TAG_FNUMBER))
+    require(fnumber > 0, "f-number must be positive")
+    require(
+        abs(2.0 ** (float(sub.get(TAG_APERTURE_APEX)) / 2.0) - fnumber) < 1e-2,
+        "ApertureValue does not agree with FNumber",
+    )
+    # And the lens string should describe the aperture it claims.
+    require(f"f/{fnumber:.1f}" in str(sub.get(TAG_LENS_MODEL)), "the lens name disagrees")
 
 
 @check("spoofing cannot smuggle the original photo back in as a thumbnail")

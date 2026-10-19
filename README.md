@@ -11,7 +11,7 @@ No uploads, no accounts, no telemetry. Drop photos in, check the map, download r
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-35%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-36%20passing-3f6b52)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
@@ -271,16 +271,18 @@ Two policies. The default is the one that says nothing at all:
 | Policy | What the exported file carries |
 |---|---|
 | **Removed** (default) | No EXIF, no GPS, no XMP, no IPTC, no maker notes, no thumbnail. The ICC profile is kept so the colours are right. |
-| **Forged** | The same stripping, then a false block: the date you choose on `DateTime`, `DateTimeOriginal` and `DateTimeDigitized` alike, `Make`/`Model` set to `Apple`/`iPhone 13`, and a location pinned to 48°52′36″S 123°23′36″W — Point Nemo, the most remote point in the ocean, picked precisely so the coordinates can never name a house. |
+| **Forged** | The same stripping, then a false block: the date you choose on `DateTime`, `DateTimeOriginal` and `DateTimeDigitized` alike; `Make`/`Model` set to `Apple`/`iPhone 13`; a full iPhone 13 exposure set — Exif 2.32, the f/1.6 lens, 26 mm-equivalent focal length, exposure time, ISO, colour space and the image's own pixel dimensions; and a location pinned to 48°52′36″S 123°23′36″W — Point Nemo, the most remote point in the ocean, picked precisely so the coordinates can never name a house. |
 
 The forged block is **built from nothing rather than copied and edited**, and that detail is the whole design. An EXIF block can carry a *thumbnail*, which is a small copy of the unredacted photo, so a spoofing pass that edited the original's tags would ship the face it had just covered inside the metadata. The tests assert the output holds exactly one JPEG stream and no thumbnail directory.
+
+It is also **complete, not just false.** A file that says `Apple / iPhone 13` and then stops is its own kind of tell — no camera records a lens and an aperture and then omits the rest — so the forgery carries what a real iPhone 13 would: `ExifVersion` 0232, the lens model string, the 35 mm-equivalent focal length, exposure time and ISO, the pixel dimensions of the image actually written, and the 72 dpi resolution in IFD0. The rule that governs all of it is internal consistency. Shutter speed and aperture are stored in the logarithmic APEX form, so they are *derived* from the exposure time and f-number rather than guessed — a block whose stated aperture contradicts its own computed one is the loudest thing a forgery can carry — and the tests check that arithmetic, along with the recorded dimensions matching the delivered image.
 
 What it is, and is not:
 
 - **It is false metadata, not the absence of metadata.** A missing block and a consistent one read differently to a tool that looks — that is a difference in suspicion, not proof either way.
 - **It is not anonymity.** The pixels are what identify a place and a person; all this removes is the file volunteering where and when it was taken.
 - **Most platforms strip EXIF on upload anyway.** It matters for files sent directly — email, chat, a USB stick, a shared folder.
-- **A `.tif` cannot carry the forged location.** Pillow only attaches a nested GPS directory through its own uncompressed writer, and libtiff rejects the offset it produces for a compressed one. Rather than change the archival format's encoding to plant a fake place, a spoofed TIFF has no location at all — the safer of the two outcomes.
+- **A `.tif` cannot carry any of the nested detail.** Pillow attaches a nested directory only through its own uncompressed writer, and libtiff rejects the offset it produces for a compressed file — which is true of the Exif sub-directory (`EXIFIFDOffset`) exactly as much as the GPS one. Rather than change the archival format's encoding to plant the detail, a spoofed TIFF keeps a flat IFD0: the camera, the resolution and all three timestamps, and nothing deeper.
 - **The default stays `Removed`.** Stamping a false date on a photo is a claim about evidence, so it is something you opt into, not something done for you.
 
 ### Presets
@@ -302,7 +304,7 @@ Detection is tens of milliseconds on a phone-sized photo, and a few hundred mill
 Two suites, no test framework, no fixtures to download:
 
 ```bash
-uv run python tests/test_engine.py   # 17/17 — detection, masking, colour, metadata, formats
+uv run python tests/test_engine.py   # 18/18 — detection, masking, colour, metadata, formats
 uv run python tests/test_api.py      # 18/18 — upload, tune, preview, render, download, disk
 ```
 
@@ -318,6 +320,7 @@ Notable coverage:
 - Restoring one face leaves that face original **and** the others covered, checked against the same ellipse geometry the browser is handed.
 - Restoring everyone hands back the photo's own pixels, exactly — the lossless path in and out.
 - A forged block carries the chosen date on all three timestamp tags, the forged camera, a Point Nemo location and no thumbnail: a source file that arrives carrying a thumbnail of the original comes out with exactly one JPEG stream.
+- The forged block reads as a real capture rather than a stub: the exposure and lens tags are present, the recorded pixel dimensions match the image actually written, and the APEX shutter and aperture values agree with the exposure time and f-number they were derived from.
 - Only a box the detector actually found can be restored; repeating a click does not double-count, junk keys and indices are refused, and a rendered result is discarded when the visible set changes.
 - Changing settings invalidates a stale result.
 - The temp spool survives startup and a real multi-megabyte upload, and the orphan purge spares reserved folders.
@@ -373,6 +376,8 @@ This is a private tool, so there is no contribution process to speak of. If you 
 2. **A preview must never disagree with the delivered file.** Previews are composed at full resolution and only then downscaled — shrinking first would change the blur kernel and the block size. It is also why the preview and the export share one face list, restored faces included.
 3. **Never describe a reversible redaction as safe.** If a mode can be partially undone, the interface has to say so.
 4. **Build forged metadata from nothing; never edit the source's tags.** An EXIF block can carry a thumbnail, which is a small copy of the *original* photo — so the obvious "copy the tags and change a few" shortcut would ship the unredacted face inside the metadata of the file that covered it.
+
+5. **Whatever the forged block claims, make it agree with itself.** A block that is merely sparse is a poor forgery, and a block that contradicts itself is a worse one: derive the APEX shutter and aperture values from the exposure time and f-number instead of guessing them, and record the dimensions of the image you actually wrote.
 
 Run both suites before committing; they are fast enough that there is no excuse not to.
 

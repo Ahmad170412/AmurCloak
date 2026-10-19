@@ -722,10 +722,12 @@ def t_spoof_end_to_end():
         out.write_bytes(client.get(f"/api/sessions/{sid}/result").data)
 
         exif = Image.open(out).getexif()
+        sub = exif.get_ifd(0x8769)
         require(exif.get(0x0132) == "2024:07:01 09:30:00", f"date: {exif.get(0x0132)!r}")
-        require(exif.get(0x9003) == "2024:07:01 09:30:00", "DateTimeOriginal missing")
-        require(exif.get(0x9004) == "2024:07:01 09:30:00", "DateTimeDigitized missing")
+        require(sub.get(0x9003) == "2024:07:01 09:30:00", "DateTimeOriginal missing")
+        require(sub.get(0x9004) == "2024:07:01 09:30:00", "DateTimeDigitized missing")
         require(exif.get(0x010F) == "Apple" and exif.get(0x0110) == "iPhone 13", "camera missing")
+        require(sub.get(0x8827) and sub.get(0xA434), "the exposure and lens detail are missing")
         require(exif.get_ifd(0x8825).get(1) == "S", "the forged location is not Point Nemo")
         require(0x0201 not in exif and dict(exif.get_ifd(1)) == {}, "a thumbnail was written")
 

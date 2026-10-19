@@ -49,6 +49,23 @@ amurcloak = "amurcloak.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/amurcloak"]
 
+[tool.hatch.build.targets.sdist]
+# The wheel is constrained by `packages`, but the sdist is not: left to itself it
+# sweeps the entire project root, so anything sitting there that is not in
+# .gitignore ships to everyone. A stray download in the root once ended up inside
+# the tarball that way. Whitelist what belongs in a source distribution instead
+# of trusting ignore rules to catch every accident.
+include = [
+    "/src/amurcloak",
+    "/tests",
+    "/assets",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/requirements.txt",
+    "/uv.lock",
+]
+
 [tool.ruff]
 # 100 rather than the 88 that is common elsewhere: several call sites here carry
 # a full argument list plus an inline comment, and wrapping them makes the
