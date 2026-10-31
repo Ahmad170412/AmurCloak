@@ -83,9 +83,11 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 amurcloak
 ```
 
-That wheel is the entire install — one file, and the same one on macOS, Windows and Linux, with every dependency resolved for your machine. If you would rather pull from the package index, `uv tool install amurcloak` does the same job.
+That wheel is the entire install — one file, and the same one on macOS, Windows and Linux, with every dependency resolved for your machine. GitHub Releases is the only published channel for now; AmurCloak is not on PyPI yet.
 
 It takes the first free port from 5000, opens your browser, and stops on Control-C. Run it a second time and it notices the copy already running instead of starting another server.
+
+The URL names the version on purpose, so moving to a later release means re-running the install command with that release's filename — see [Install](#install). `uv tool upgrade amurcloak` does not cross versions for a URL install.
 
 No API keys, no configuration files, no model download — the detector ships inside the package.
 
@@ -139,7 +141,7 @@ A single process, one request at a time, no queue and no worker pool:
 | **Forged metadata (opt-in)** | Leave stripped, or write a deliberately false block instead: a chosen date on all three timestamp tags, a made-up camera, and a location fixed to the emptiest point in the Pacific — built from nothing, so no thumbnail and no maker notes from the original can tag along. |
 | **Light and dark** | One workspace at two exposures, chosen with the toggle in the top bar. It follows your system until you pick a side, then remembers. The theme is settled before the first paint, so there is no flash, and every text-on-background pair in both themes clears WCAG AA. |
 | **HEIC support** | iPhone photos work directly, via `pillow-heif`. |
-| **Nine input formats** | BMP, HEIC, HEIF, JPEG, PNG, TIFF, WebP — outputs keep the original format. |
+| **Nine input extensions** | `.bmp`, `.heic`, `.heif`, `.jpeg`, `.jpg`, `.png`, `.tif`, `.tiff`, `.webp` — outputs keep the original format. |
 | **Streaming batches** | Outputs are appended to a `ZIP_STORED` archive and unlinked as they go, so a batch never exists twice on disk. |
 | **Automatic cleanup** | Idle sessions are reaped, inputs are freed on download, and orphans are purged at startup. |
 | **No outbound network** | No CDN, no webfonts, no telemetry, no cloud API. The interface is plain HTML, CSS and JavaScript with no build step. |
@@ -172,17 +174,18 @@ Deliberately absent: **PyTorch**, **onnxruntime**, and any **ffmpeg** binary. Yu
 The Quick Start above is the whole thing. Two other routes, if you want them:
 
 ```bash
-git clone <this-repository> AmurCloak
+git clone https://github.com/Ahmad170412/AmurCloak.git
 cd AmurCloak && uv tool install .                       # from a checkout
 uv tool install dist/amurcloak-0.9.0-py3-none-any.whl   # from a wheel you built
 ```
 
-Upgrading and removing are each one command:
+Re-running the Quick Start install command with the new version's wheel filename upgrades in place; `uv tool install` replaces the existing environment. Removing is one command:
 
 ```bash
-uv tool upgrade amurcloak
 uv tool uninstall amurcloak
 ```
+
+`uv tool upgrade amurcloak` is deliberately not the upgrade instruction here. uv remembers the exact requirement an install was given, and a URL names `0.9.0` — so an upgrade would keep resolving `0.9.0` rather than looking for a newer release. If AmurCloak is published to PyPI later, both `uv tool install amurcloak` and `uv tool upgrade amurcloak` will work as usual.
 
 `uv tool install` gives each tool its own isolated environment and drops a small shim on your `PATH`. It does not touch your system Python, and uninstalling leaves nothing behind.
 
