@@ -160,11 +160,17 @@ def _clip_preview(session, item, index: int, view: str, t: float):
         width=width, height=height,
     )
 
+    # A clip's restored names are tracker ids, stored as ("t", id) so they cannot
+    # be mistaken for a photo's box coordinates. Unwrap them before comparing:
+    # this used to keep the raw tuples and test them against ``mask.track``, which
+    # never matched, so a preview painted over a person the export was about to
+    # leave visible - and reported them as covered, which also hid the control
+    # that puts them back under cover.
     with session.lock:
-        restored_keys = set(item.restored)
+        restored_ids = {int(key[1]) for key in item.restored if key and key[0] == "t"}
     masks_here = scan.masks[frame_index]
-    covered = [m.to_face() for m in masks_here if m.track not in restored_keys]
-    kept = [m.to_face() for m in masks_here if m.track in restored_keys]
+    covered = [m.to_face() for m in masks_here if m.track not in restored_ids]
+    kept = [m.to_face() for m in masks_here if m.track in restored_ids]
     kept_keys = frozenset(f.key() for f in kept)
 
     image = pipeline.render_preview_bytes(decoded, covered, settings, view, restored=kept)

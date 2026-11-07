@@ -81,6 +81,10 @@ def scan_frames(
     frame count; without one the callback reports nothing rather than a raw
     frame count, which would be misread as a fraction by every caller.
 
+    The duration cap is measured on the decode clock, and that clock is only as
+    good as the container: see ``probe.MAX_SCAN_FRAMES`` for the backstop that
+    keeps a file with no advancing timestamps from being read to the end.
+
     Returns the detections and the frame rate measured from the decoder's own
     timestamps (0.0 when it cannot be measured). Pass B has to encode at *some*
     rate, and the container's stated one is a claim: a variable-rate or
@@ -106,6 +110,16 @@ def scan_frames(
                 raise VideoError(
                     f"{path.name} runs past the {int(probe.MAX_CLIP_SEC)}s clip limit "
                     "- trim it first, then drop it in."
+                )
+            if len(frames) >= probe.MAX_SCAN_FRAMES:
+                # The clock above never moved, so the only thing still bounding
+                # this file is how many frames it has. Refuse rather than keep
+                # decoding something that will not say how long it is.
+                raise VideoError(
+                    f"{path.name} holds more frames than a "
+                    f"{int(probe.MAX_CLIP_SEC)}s clip can, and its timestamps never "
+                    "advance, so its length cannot be checked. Re-encode it, then "
+                    "drop it in."
                 )
             frames.append(detector.detect(frame))
             if on_progress is not None:

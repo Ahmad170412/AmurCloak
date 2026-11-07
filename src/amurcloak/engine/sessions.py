@@ -60,6 +60,13 @@ PREVIEW_MAX_EDGE = 1400
 PREVIEW_CACHE_PIXELS = 40_000_000  # don't cache monsters in RAM
 PHOTO_CACHE_ENTRIES = 2
 
+# Clip scans are CPU-bound and share one process. A batch can hold three hundred
+# clips, and a first preview of each starts its own thread, so a page that
+# touched every clip would otherwise have them all decoding at once. Two at a
+# time keeps the cores busy without making the whole machine stop answering.
+MAX_CONCURRENT_SCANS = 2
+_SCAN_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_SCANS)
+
 
 class StorageError(Exception):
     """Not enough room, or a limit would be exceeded. Message is user-facing."""
@@ -315,6 +322,12 @@ class Session:
                 item.faces = 0
                 item.scan_state = "idle"
                 item.scan_progress = 0.0
+                # A clip's restored names are tracker ids, and ids are handed
+                # out in order of first appearance by whichever scan runs. Keep
+                # them across a re-scan and "leave 3 visible" quietly names a
+                # different person. A photo's keys are box coordinates, which
+                # simply stop matching - the safe way to forget.
+                item.restored.clear()
 
     def covered(self, item: Item, detector: FaceDetector) -> list[Face]:
         """The faces that will actually be masked: detections minus the restored.
@@ -485,13 +498,14 @@ class Session:
                 self._clip_events[item.stored] = event
             source = self.in_dir / item.stored
             try:
-                frames, measured_fps = video_render.scan_frames(
-                    source,
-                    detector,
-                    on_progress=on_progress,
-                    total_frames=int(item.meta.get("frames") or 0),
-                )
-                masks = video_track.build_masks(frames)
+                with _SCAN_SLOTS:
+                    frames, measured_fps = video_render.scan_frames(
+                        source,
+                        detector,
+                        on_progress=on_progress,
+                        total_frames=int(item.meta.get("frames") or 0),
+                    )
+                    masks = video_track.build_masks(frames)
             except Exception as exc:  # a failed scan is a reported state
                 with self.lock:
                     scan.state = "error"
@@ -544,13 +558,16 @@ class Session:
             item.scan_progress = fraction
 
         try:
-            frames, measured_fps = video_render.scan_frames(
-                source,
-                detector,
-                on_progress=progress,
-                total_frames=int(item.meta.get("frames") or 0),
-            )
-            masks = video_track.build_masks(frames)
+            # One of the process-wide scan slots, so a batch full of clips cannot
+            # put every core into detection at the same time.
+            with _SCAN_SLOTS:
+                frames, measured_fps = video_render.scan_frames(
+                    source,
+                    detector,
+                    on_progress=progress,
+                    total_frames=int(item.meta.get("frames") or 0),
+                )
+                masks = video_track.build_masks(frames)
         except Exception as exc:  # noqa: BLE001 - recorded on the session, never swallowed silently
             with self.lock:
                 # A settings change may have cleared the cache and started a new

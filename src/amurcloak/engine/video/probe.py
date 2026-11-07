@@ -10,7 +10,10 @@ Two limits exist, both intentionally blunt:
 * **The read loop.** Container metadata lies often enough that the duration
   printed by ``probe`` is treated as advisory. The limit is enforced again while
   actually reading frames, from the decoder's own timestamps, so a corrupt or
-  lying container cannot turn a "3 second" file into an unbounded scan.
+  lying container cannot turn a "3 second" file into an unbounded scan. Where
+  those timestamps never advance there is no clock to check against at all, so
+  the loop also carries a frame ceiling - a backstop that cannot refuse a real
+  clip but does bound a file that refuses to say how long it is.
 
 Pixels and frame rate are never re-scaled. Same truthfulness rule as photos:
 the exported clip keeps the source's dimensions and rate, and the preview shows
@@ -34,6 +37,20 @@ MAX_CLIP_SEC = 60.0
 # one so a source whose timestamps jitter between frames does not fail a file
 # the metadata probe had already accepted at 59.9s.
 MAX_SCAN_SEC = MAX_CLIP_SEC + 0.99
+
+# The bound the read loop falls back to when the decoder's clock never moves.
+# It matters because duration is enforced against that clock: a container that
+# reports the same timestamp for every frame (a raw H.264 stream named .mp4 is
+# the easy case) makes the check unreachable, and "70 seconds" then reads as
+# zero. At 300fps - faster than any camera writes - this is still more frames
+# than an accepted clip can hold, so it never refuses a real file, and it stops
+# a multi-hour file from being scanned for hours.
+MAX_SCAN_FRAMES = int(MAX_SCAN_SEC * 300)
+
+# Largest frame a clip may decode. 8K, because a bgr24 frame at that size is
+# already 100MB and both passes hold one at a time: photos can afford a generous
+# pixel cap, a clip pays it on every frame of both passes.
+MAX_CLIP_PIXELS = 7680 * 4320
 
 # FFmpeg's own banner, silenced so its stderr is only ever our parsing input.
 _FFMPEG_QUIET = ("-hide_banner",)
@@ -171,10 +188,18 @@ def probe(path: str | Path) -> ClipInfo:
     if fps <= 0 or width <= 0 or height <= 0:
         raise VideoError(f"{path.name} has no readable video track")
 
-    # A sane caps: OpenCV's own decoder guard is 2**31, which no clip we accept
-    # should reach, but a nonsense value here is cheap to exclude.
-    if width * height > 200_000_000:
-        raise VideoError(f"{path.name} is larger than the {200_000_000 // 1_000_000}MP limit")
+    if width * height > MAX_CLIP_PIXELS:
+        raise VideoError(
+            f"{path.name} is {width}x{height}; clips are limited to 8K "
+            f"({MAX_CLIP_PIXELS / 1e6:.0f}MP). Re-encode it smaller first."
+        )
+
+    # A container that cannot count its frames has no duration to compare with
+    # the limit. A raw stream reports a negative number here, which would read
+    # as "zero length" and let a very long file through, so an impossible count
+    # is treated as unknown rather than believed.
+    if not 0 <= frames <= MAX_SCAN_FRAMES:
+        frames = 0
 
     duration = frames / fps if frames > 0 else 0.0
     if duration > MAX_CLIP_SEC:

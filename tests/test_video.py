@@ -17,11 +17,13 @@ than in the photo path because a still gets looked at once and a clip does not.
 
 from __future__ import annotations
 
+import base64
 import io
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -131,6 +133,73 @@ def face_clip(path: Path, seconds: float = 1.0, rate: int = 10, audio: bool = Fa
     return path
 
 
+def raw_stream_clip(path: Path, seconds: float = 2.0, rate: int = 10) -> Path:
+    """A raw H.264 stream wearing an .mp4 name: no container, therefore no clock.
+
+    This is the shape that slipped past the duration limit: every frame reports
+    t=0 and the frame count is negative garbage, so a two-minute file reads as
+    zero-length and the read loop never has a timestamp to refuse.
+    """
+    elementary = path.with_suffix(".h264")
+    ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=size=160x120:duration={seconds}:rate={rate}:color=white",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        str(elementary),
+    )
+    elementary.replace(path)
+    return path
+
+
+def upload_clip(client, path: Path) -> str:
+    """Post one clip the way the page does, and hand back the session id."""
+    upload = client.post(
+        "/api/sessions",
+        data={
+            "settings": (
+                '{"mode":"black","preset":"balanced","margin":14,"strength":70,'
+                '"metadata":"strip","keep_audio":true}'
+            ),
+            "files": [(io.BytesIO(path.read_bytes()), path.name)],
+        },
+        content_type="multipart/form-data",
+    )
+    require(upload.status_code == 201, f"upload: {upload.data!r}")
+    return upload.get_json()["id"]
+
+
+def preview_payload(client, sid: str, timeout: float = 90.0) -> dict:
+    """Wait out the background scan, then hand back the frame it produced."""
+    payload: dict = {}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        payload = client.get(f"/api/sessions/{sid}/preview?index=0&view=result&t=0").get_json()
+        if not payload.get("scanning"):
+            return payload
+        time.sleep(0.2)
+    raise AssertionError(f"the scan never finished: {payload}")
+
+
+def preview_pixels(payload: dict) -> np.ndarray:
+    raw = base64.b64decode(payload["image"])
+    frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    require(frame is not None, "the preview was not a decodable image")
+    return frame
+
+
+def mask_point(payload: dict, face: dict, frame: np.ndarray) -> tuple[float, float]:
+    """A mask centre in the pixels of the preview, whatever scale it came back at."""
+    scale = frame.shape[1] / payload["width"] if payload.get("width") else 1.0
+    return face["mask"]["cx"] * scale, face["mask"]["cy"] * scale
+
+
 def frames_of(path: Path) -> list[np.ndarray]:
     cap = cv2.VideoCapture(str(path))
     frames: list[np.ndarray] = []
@@ -202,6 +271,51 @@ def test_clip_over_limit_refused():
         require("trim" in str(exc).lower(), f"unhelpful refusal: {exc}")
     else:
         raise AssertionError("an over-length clip was accepted")
+
+
+@check("a clip with a dead clock is stopped by its frame count")
+def test_no_clock_is_stopped_by_frame_count():
+    source = raw_stream_clip(SCRATCH / "raw.mp4", seconds=2.0, rate=10)
+    info = probe.probe(source)
+    require(info.frame_count == 0, f"a raw stream claimed {info.frame_count} frames")
+    require(info.duration == 0.0, f"a raw stream claimed to run {info.duration}s")
+
+    # The real ceiling is thousands of frames; shrink it so the guard is
+    # reachable with a fixture that encodes in a tenth of a second.
+    original = probe.MAX_SCAN_FRAMES
+    probe.MAX_SCAN_FRAMES = 8
+    try:
+        video_render.scan_frames(source, video_render.clip_detector(build("balanced")))
+    except VideoError as exc:
+        require("timestamps" in str(exc), f"refused for the wrong reason: {exc}")
+    else:
+        raise AssertionError("a 20-frame clip with a dead clock was scanned to the end")
+    finally:
+        probe.MAX_SCAN_FRAMES = original
+
+
+@check("a frame bigger than 8K is refused before anything decodes it")
+def test_eight_k_is_refused():
+    source = SCRATCH / "eightk.mp4"
+    ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=size=8192x4320:duration=0.2:rate=5:color=gray",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        str(source),
+    )
+    try:
+        probe.probe(source)
+    except VideoError as exc:
+        require("8K" in str(exc), f"unhelpful refusal: {exc}")
+    else:
+        raise AssertionError("an 8192x4320 frame was accepted for redaction")
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +556,54 @@ def test_scan_measures_the_rate():
 # ---------------------------------------------------------------------------
 
 
+@check("clip scans share two slots instead of one thread each")
+def test_scan_concurrency_is_bounded():
+    from amurcloak.engine import sessions as sessions_module
+
+    root = SCRATCH / "conc" / "session"
+    root.mkdir(parents=True, exist_ok=True)
+    session = sessions_module.Session(root, build("balanced"))
+    source = solid_clip(SCRATCH / "conc-source.mp4", seconds=1.0, rate=10)
+
+    class SlowDetector:
+        """Stands in for YuNet: the point here is how many run at once."""
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.live = 0
+            self.peak = 0
+
+        def detect(self, _frame):
+            with self.lock:
+                self.live += 1
+                self.peak = max(self.peak, self.live)
+            time.sleep(0.02)
+            with self.lock:
+                self.live -= 1
+            return []
+
+    detector = SlowDetector()
+    items = []
+    for index in range(6):
+        stored = f"{index:04d}.mp4"
+        shutil.copyfile(source, session.in_dir / stored)
+        item = sessions_module.Item(name=f"clip-{index}.mp4", stored=stored, kind="video")
+        item.meta = {"frames": 10}
+        session.items.append(item)
+        items.append(item)
+
+    for item in items:
+        session.request_clip_scan(item, detector)
+    for item in items:
+        session.wait_for_clip_scan(item)
+
+    require(detector.peak >= 1, "no scan ran at all")
+    require(
+        detector.peak <= sessions_module.MAX_CONCURRENT_SCANS,
+        f"{detector.peak} scans ran at once, the cap is {sessions_module.MAX_CONCURRENT_SCANS}",
+    )
+
+
 @check("a clip uploads, previews, renders and downloads")
 def test_clip_upload_and_render_roundtrip():
     clip = face_clip(SCRATCH / "roundtrip.mp4", seconds=2.0)
@@ -502,6 +664,58 @@ def test_clip_upload_and_render_roundtrip():
     require(
         abs(info.duration - source_info.duration) <= max(0.3, 0.15 * source_info.duration),
         f"the export runs {info.duration:.1f}s against a {source_info.duration:.1f}s source",
+    )
+
+    app.dispose()
+
+
+@check("leaving a person visible reaches the preview, and a re-scan forgets them")
+def test_leave_visible_reaches_the_preview():
+    clip = face_clip(SCRATCH / "leave-visible.mp4", seconds=1.0)
+    app = create_app(Config(tmp_root=SCRATCH / "app-leave", ttl=3600, max_age=7200))
+    client = app.test_client()
+    sid = upload_clip(client, clip)
+
+    payload = preview_payload(client, sid)
+    require(payload.get("faces"), f"nothing to leave visible: {payload.get('note')}")
+    face = payload["faces"][0]
+    # A clip's unit of choice is the tracked person, so the key has to name one.
+    require(face["key"][:1] == ["t"], f"a clip handed back the key {face['key']}")
+    require(face["covered"] is True, "a clip started with a face uncovered")
+
+    frame = preview_pixels(payload)
+    covered_at = mask_point(payload, face, frame)
+    require(patch_mean(frame, *covered_at) < 40, "the face is not covered before the click")
+
+    toggle = client.post(
+        f"/api/sessions/{sid}/faces",
+        json={"index": 0, "key": face["key"], "covered": False},
+    )
+    require(toggle.status_code == 200, f"leaving the person visible failed: {toggle.data!r}")
+    require(toggle.get_json()["items"][0]["restored"] == 1, "the choice was not recorded")
+
+    payload = preview_payload(client, sid)
+    require(payload["restored"] == 1, "the preview still reports the person covered")
+    frame = preview_pixels(payload)
+    visible_at = mask_point(payload, payload["faces"][0], frame)
+    require(
+        patch_mean(frame, *visible_at) > 40,
+        f"the preview still paints over the person ({patch_mean(frame, *visible_at):.0f})",
+    )
+
+    # Track ids are positional and handed out again by any new scan, so a choice
+    # kept across one would silently name whoever is track 1 next time. The
+    # payload flips tiling because that is the detection knob a request can
+    # actually move.
+    settings = client.post(
+        f"/api/sessions/{sid}/settings", json={"preset": "balanced", "tiles": False}
+    )
+    require(settings.status_code == 200, f"settings: {settings.data!r}")
+    require(settings.get_json()["detection_changed"] is True, "nothing detection-related moved")
+    snapshot = client.get(f"/api/sessions/{sid}").get_json()
+    require(
+        snapshot["items"][0]["restored"] == 0,
+        "a clip kept a track id across a re-scan, which can name another person",
     )
 
     app.dispose()
