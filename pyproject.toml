@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amurcloak"
-version = "0.9.0"
-description = "Local face redaction for photos. Nothing leaves this machine."
+version = "0.10.0"
+description = "Local face redaction for photos and short clips. Nothing leaves this machine."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -26,15 +26,23 @@ classifiers = [
     "Topic :: Security",
 ]
 
-# Deliberately tiny: no torch, no onnxruntime, no ffmpeg binary. YuNet runs
-# through the DNN module OpenCV already ships, and every entry here has prebuilt
-# wheels on PyPI for macOS, Windows and Linux.
+# Deliberately tiny: no torch, no onnxruntime. YuNet runs through the DNN
+# module OpenCV already ships, and every entry here has prebuilt wheels on
+# PyPI for macOS, Windows and Linux.
+#
+# imageio-ffmpeg is the one heavyweight exception, and it exists for a hard
+# reason: cv2.VideoWriter cannot mux audio, and its encoders emit MPEG-4 Part
+# 2, which Chrome refuses to play. A Silent, half-incompatible clip is not a
+# shareable clip. imageio-ffmpeg ships a per-platform STATIC ffmpeg binary in
+# the wheel, so the runtime network posture is unchanged: nothing is ever
+# fetched at run time, the binary just arrives with the install.
 dependencies = [
     "flask>=3.0",
     "numpy>=1.26",
     "opencv-python-headless>=4.10",
     "pillow>=10.0",
     "pillow-heif>=0.16",
+    "imageio-ffmpeg>=0.5",
 ]
 
 [project.urls]

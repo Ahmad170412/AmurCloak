@@ -20,6 +20,9 @@
     viewerName: $("#viewer-name"),
     viewerIndex: $("#viewer-index"),
     viewerNote: $("#viewer-note"),
+    scrub: $("#scrub"),
+    scrubRange: $("#scrub-range"),
+    scrubTime: $("#scrub-time"),
     fileList: $("#file-list"),
     filesNote: $("#files-note"),
     railCount: $("#rail-count"),
@@ -37,6 +40,9 @@
     spoofWhen: $("#spoof-when"),
     metadataNote: $("#metadata-note"),
     metadataFlag: $("#metadata-flag"),
+    audioOptions: $("#audio-options"),
+    audioNote: $("#audio-note"),
+    audioGroup: $("#group-audio-clip"),
     renderBtn: $("#render-btn"),
     downloadBtn: $("#download-btn"),
     redactAgain: $("#redact-again"),
@@ -64,6 +70,7 @@
     snapshot: null,
     index: 0,
     view: "audit",
+    t: 0, // where in the current clip the preview is (seconds)
     settings: {
       mode: "black",
       preset: "balanced",
@@ -71,6 +78,7 @@
       strength: 0.7,
       metadata: "strip",
       spoof_when: "",
+      keep_audio: true,
     },
     faces: [], // the last preview's detections, for the click targets
     previewToken: 0,
@@ -80,6 +88,7 @@
     uploadXhr: null,
     pollTimer: null,
     settingsTimer: null,
+    previewTimer: null, // clip "scanning" re-asks
   };
 
   /* ── theme ─────────────────────────────────────────────────────
@@ -240,6 +249,40 @@
     }
   }
 
+  /* What a clip's sound does. Kept by default and copied losslessly, with the
+     second option a straight strip - a voice identifies a person as surely as
+     a face, so the choice has to be visible rather than made by the tool. */
+  const AUDIO_LABELS = [
+    ["keep", "Keep"],
+    ["remove", "Remove"],
+  ];
+
+  const AUDIO_COPY = {
+    keep:
+      "The clip's own sound stays, copied unchanged from the original file. Toggle this off when the voice is part of what should be hidden.",
+    remove:
+      "No sound in the exported clip. A voice can identify someone just as a face can.",
+  };
+
+  function renderAudioOptions() {
+    el.audioOptions.innerHTML = "";
+    for (const [key, label] of AUDIO_LABELS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "seg";
+      button.dataset.audio = key;
+      button.textContent = label;
+      button.title = AUDIO_COPY[key];
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        state.settings.keep_audio = key === "keep";
+        syncControls();
+        pushSettings();
+      });
+      el.audioOptions.appendChild(button);
+    }
+  }
+
   function setMarginSlider(margin) {
     state.settings.margin = margin;
     el.margin.value = String(Math.round(margin * 100));
@@ -288,6 +331,13 @@
     el.whenRow.hidden = !forging;
     if (state.settings.spoof_when) el.spoofWhen.value = state.settings.spoof_when;
     el.metadataNote.textContent = METADATA_COPY[state.settings.metadata] || "";
+
+    for (const button of el.audioOptions.children) {
+      const on = (button.dataset.audio === "keep") === state.settings.keep_audio;
+      button.classList.toggle("is-on", on);
+      button.setAttribute("aria-pressed", String(on));
+    }
+    el.audioNote.textContent = state.settings.keep_audio ? AUDIO_COPY.keep : AUDIO_COPY.remove;
   }
 
   function pushSettings() {
@@ -311,6 +361,7 @@
             strength: state.settings.strength,
             metadata: state.settings.metadata,
             spoof_when: state.settings.spoof_when,
+            keep_audio: state.settings.keep_audio,
           }),
         });
         if (sid === state.sid) {
@@ -374,23 +425,57 @@
     });
   }
 
+  function isClipItem(item) {
+    return Boolean(item && item.kind === "video");
+  }
+
+  function currentItem() {
+    if (!state.snapshot || !state.snapshot.items.length) return null;
+    return state.snapshot.items[Math.max(0, Math.min(state.index, state.snapshot.items.length - 1))] || null;
+  }
+
   async function refreshPreview() {
     if (!state.sid || !state.snapshot || !state.snapshot.items.length) return;
     const token = ++state.previewToken;
+    const item = currentItem();
+    const clip = isClipItem(item);
     el.viewerLoading.hidden = false;
 
     try {
+      const tParam = clip ? `&t=${encodeURIComponent(state.t)}` : "";
       const payload = await api(
-        `/api/sessions/${state.sid}/preview?index=${state.index}&view=${state.view}`
+        `/api/sessions/${state.sid}/preview?index=${state.index}&view=${state.view}${tParam}`
       );
       if (token !== state.previewToken) return; // a newer request already won
+
+      if (payload.scanning) {
+        // A clip is being watched for the first time: the whole run of frames
+        // has to be seen once before any frame can be shown, so no image yet -
+        // say so, keep the spinner, and ask again shortly. A pull loop, not a
+        // push: nothing here holds a request open for a minute.
+        el.previewImg.removeAttribute("src");
+        hideFaces();
+        if (payload.scan_error) {
+          el.viewerNote.textContent = `The clip could not be read: ${payload.scan_error}`;
+          el.viewerLoading.hidden = true;
+          return;
+        }
+        el.viewerNote.textContent =
+          "Finding faces in the clip from end to end... this runs once, then the whole clip scrubs freely.";
+        state.previewTimer = setTimeout(() => {
+          if (token !== state.previewToken) return;
+          refreshPreview();
+        }, 600);
+        return;
+      }
+
       el.previewImg.src = `data:image/jpeg;base64,${payload.image}`;
       el.viewerNote.textContent = payload.note;
       renderFaces(payload);
+      syncScrub(clip, payload);
 
       // The rail learns the face count for whatever was just checked, so it can
       // report real numbers without scanning every photo up front.
-      const item = state.snapshot && state.snapshot.items[state.index];
       if (item && typeof payload.count === "number") {
         if (item.faces !== payload.count || !item.scanned) {
           item.faces = payload.count;
@@ -412,6 +497,31 @@
     } finally {
       if (token === state.previewToken) el.viewerLoading.hidden = true;
     }
+  }
+
+  /* The scrub is clips-only, and the one place the preview's timestamp lives.
+     Positions are recomputed from the payload the server answered with, so the
+     bar never claims a frame that was not the one rendered. */
+  function syncScrub(clip, payload) {
+    el.scrub.hidden = !clip;
+    if (!clip) return;
+    const duration = Number(
+      (payload && payload.meta && payload.meta.duration) || 0
+    );
+    if (duration > 0) {
+      el.scrubRange.max = "1000";
+      el.scrubRange.dataset.duration = String(duration);
+      const pct = Math.max(0, Math.min(1000, Math.round((state.t / duration) * 1000)));
+      el.scrubRange.value = String(pct);
+      el.scrubTime.textContent = `${formatClock(state.t)} / ${formatClock(duration)}`;
+    }
+  }
+
+  function formatClock(seconds) {
+    const s = Math.max(0, seconds || 0);
+    const whole = Math.floor(s);
+    const tenth = Math.floor((s - whole) * 10);
+    return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}.${tenth}`;
   }
 
   /* ── picking people ──────────────────────────────────────────── */
@@ -559,6 +669,7 @@
 
   async function selectIndex(index) {    if (!state.snapshot || !state.snapshot.items.length) return;
     state.index = Math.max(0, Math.min(index, state.snapshot.items.length - 1));
+    state.t = 0; // each file starts at its own beginning
     renderFiles();
     const item = state.snapshot.items[state.index];
     el.viewerName.textContent = item.name;
@@ -593,36 +704,46 @@
       if (index === state.index) button.classList.add("is-current");
       if (item.status === "error") button.classList.add("is-failed");
 
+      const isClip = isClipItem(item);
       let chip;
       if (item.status === "error") chip = `<span class="chip chip-failed">failed</span>`;
+      else if (isClip && item.scan_state === "running" && item.status !== "done")
+        chip = `<span class="chip chip-working">watching</span>`;
       else if (item.status === "done") chip = `<span class="chip chip-done">redacted</span>`;
       else if (snapshot.state === "rendering") chip = `<span class="chip chip-working">working</span>`;
       else chip = "";
 
+      const clipText = isClip && item.meta && item.meta.duration
+        ? `${Math.ceil(item.meta.duration)}s clip`
+        : "";
       const faceText = item.scanned
         ? `${item.faces} ${plural(item.faces, "face", "faces")}` +
           (item.restored ? ` · ${item.restored} left visible` : "")
         : "";
 
+      const statusBits = [chip, clipText && `<span>${clipText}</span>`].filter(Boolean);
+      statusBits.push(faceText ? `<span>${faceText}</span>` : "");
+
       button.innerHTML = `
         <span class="file-num">${index + 1}</span>
         <span class="file-name">${escapeHtml(item.name)}</span>
         <span class="file-size">${formatBytes(item.size)}</span>
-        <span class="file-status">${chip}${faceText ? `<span>${faceText}</span>` : ""}</span>`;
+        <span class="file-status">${statusBits.join("")}</span>`;
       button.addEventListener("click", () => selectIndex(index));
       li.appendChild(button);
       el.fileList.appendChild(li);
     });
 
-    const failed = snapshot.items.filter((i) => i.status === "error").length;
-    const total = snapshot.items.length;
-    const checked = snapshot.items.filter((i) => i.scanned).length;
-    const totalFaces = snapshot.items.reduce((sum, i) => sum + (i.faces || 0), 0);
-
     // The one place disk footprint is reported: it describes *these* photos.
     // Free space on the volume is not shown - the OS already tells you that, and
     // nothing here acts on it. The upload guard errors with the number if it
     // ever actually matters.
+    const failed = snapshot.items.filter((i) => i.status === "error").length;
+    const total = snapshot.items.length;
+    const checked = snapshot.items.filter((i) => i.scanned).length;
+    const totalFaces = snapshot.items.reduce((sum, i) => sum + (i.faces || 0), 0);
+    const hasClips = snapshot.items.some(isClipItem);
+
     const parts = [];
     if (checked) {
       // "0 faces found" is the single most important thing this tool can tell
@@ -640,7 +761,7 @@
     }
 
     el.filesNote.textContent =
-      parts.join(", ") || "Click a photo to check it before redacting.";
+      parts.join(", ") || (hasClips ? "Click a file to check it before redacting." : "Click a photo to check it before redacting.");
   }
 
   // Placeholder rows for files that are still in flight. They exist so a drop
@@ -708,16 +829,29 @@
     el.metadataFlag.textContent = `Heads up: ${bits.join(" and ")}.`;
   }
 
+  function namingFor(items) {
+    /** What to call a mixed batch, in one word: photos, clips, or files. */
+    const clips = items.filter(isClipItem).length;
+    const photos = items.length - clips;
+    if (clips && photos) return "files";
+    if (clips) return plural(clips, "clip", "clips");
+    return plural(photos, "photo", "photos");
+  }
+
   function renderActions() {
     const snapshot = state.snapshot;
     const hasItems = Boolean(snapshot && snapshot.items.length);
-    const renderable = hasItems ? snapshot.items.filter((i) => i.status !== "error").length : 0;
+    const live = hasItems ? snapshot.items.filter((i) => i.status !== "error") : [];
+    const renderable = live.length;
 
     el.renderBtn.hidden = false;
     el.downloadBtn.hidden = true;
     el.redactAgain.hidden = true;
     el.progress.hidden = true;
     el.renderBtn.disabled = !hasItems || renderable === 0 || state.busy;
+
+    // The clip control only earns its place when a batch actually holds clips.
+    el.audioGroup.hidden = !hasItems || !live.some(isClipItem);
 
     if (!hasItems) {
       el.renderBtn.textContent = "Redact photos";
@@ -732,27 +866,38 @@
       el.progress.hidden = false;
       const total = snapshot.total || 1;
       const done = snapshot.progress || 0;
-      el.progressFill.style.width = `${Math.round((done / total) * 100)}%`;
-      el.progressText.textContent = `Redacting ${Math.min(done + (done < total ? 1 : 0), total)} of ${total}`;
+      const noun = namingFor(live);
+      if (noun === "clips" || noun === "files") {
+        // Clips step continuously, so the honest unit is the bar itself;
+        // "rendering 0 of 2" would sit on 0 for a minute and read as hung.
+        const pct = Math.min(100, Math.round((done / total) * 100));
+        el.progressFill.style.width = `${pct}%`;
+        el.progressText.textContent = `Redacting ${noun} ${pct}%`;
+      } else {
+        el.progressFill.style.width = `${Math.round((done / total) * 100)}%`;
+        el.progressText.textContent = `Redacting ${Math.min(done + (done < total ? 1 : 0), total)} of ${total}`;
+      }
       el.actionNote.textContent = "";
       return;
     }
 
     if (snapshot.state === "ready" && snapshot.result.ready) {
       const count = snapshot.items.filter((i) => i.status === "done").length;
+      const noun = namingFor(snapshot.items.filter((i) => i.status === "done"));
       const freed = Boolean(snapshot.disk && snapshot.disk.inputs_freed);
       // One primary at a time, and it is whichever comes next. Download takes
       // the slot Redact just vacated instead of stacking a second amber button,
       // so the eye is never asked which of two equals to press.
       el.renderBtn.hidden = true;
       el.downloadBtn.hidden = false;
-      el.downloadBtn.textContent = `Download ${count} ${plural(count, "photo", "photos")}`;
+      el.downloadBtn.textContent = `Download ${count} ${noun}`;
       // Re-rendering reads the staged copies. Once those have been freed there
-      // is nothing left to read, and the button would only produce an error.
+      // is nothing left to re-check a face against, and the button would only
+      // produce an error.
       el.redactAgain.hidden = false;
       el.redactAgain.disabled = state.busy || freed;
       el.actionNote.textContent = snapshot.downloaded
-        ? "Staged copies were freed to reclaim space. Drop the photos again to redact them differently."
+        ? "Staged copies were freed to reclaim space. Drop the files again to redact them differently."
         : `Output is ${formatBytes(snapshot.result.size)}. Staged copies are freed once you download.`;
       return;
     }
@@ -764,9 +909,9 @@
       return;
     }
 
-    const label = `${renderable} ${plural(renderable, "photo", "photos")}`;
-    el.renderBtn.textContent = `Redact ${label}`;
-    el.actionNote.textContent = "Faces are covered on this machine. Nothing is sent anywhere.";
+    el.renderBtn.textContent = `Redact ${renderable} ${namingFor(live)}`;
+    el.actionNote.textContent =
+      "Faces are covered on this machine. Nothing is sent anywhere.";
   }
 
   function applySnapshot(snapshot) {
@@ -779,6 +924,7 @@
     el.dropzone.hidden = hasItems;
     el.viewer.hidden = !hasItems;
     el.resetBtn.hidden = !hasItems;
+    el.scrub.hidden = !hasItems || !isClipItem(currentItem());
 
     renderFiles();
     renderMetadataFlag();
@@ -905,6 +1051,7 @@
     const previous = state.sid;
     clearTimeout(state.pollTimer);
     clearTimeout(state.settingsTimer);
+    clearTimeout(state.previewTimer);
 
     state.uploading = true;
     state.sid = null;
@@ -940,6 +1087,7 @@
         strength: state.settings.strength,
         metadata: state.settings.metadata,
         spoof_when: state.settings.spoof_when,
+        keep_audio: state.settings.keep_audio,
       })
     );
 
@@ -1047,6 +1195,7 @@
   async function reset({ quiet = false } = {}) {
     clearTimeout(state.pollTimer);
     clearTimeout(state.settingsTimer);
+    clearTimeout(state.previewTimer);
     const sid = state.sid;
     state.sid = null;
     state.snapshot = null;
@@ -1136,6 +1285,17 @@
       pushSettings();
     });
 
+    el.scrubRange.addEventListener("input", () => {
+      const item = currentItem();
+      const duration = Number(
+        (item && item.meta && item.meta.duration) || el.scrubRange.dataset.duration || 0
+      );
+      if (duration <= 0) return;
+      state.t = (Number(el.scrubRange.value) / 1000) * duration;
+      el.scrubTime.textContent = `${formatClock(state.t)} / ${formatClock(duration)}`;
+      refreshPreview();
+    });
+
     el.strength.addEventListener("input", () => {
       state.settings.strength = Number(el.strength.value) / 100;
       el.strengthOut.textContent = `${el.strength.value}%`;
@@ -1222,6 +1382,7 @@
       state.settings.strength = defaults.strength;
       state.settings.metadata = defaults.metadata || "strip";
       state.settings.spoof_when = defaults.spoof_when || "";
+      state.settings.keep_audio = defaults.keep_audio !== false;
       const preset = config.presets.find((p) => p.key === defaults.preset);
       setMarginSlider(preset ? preset.margin : 0.14);
       el.strength.value = String(Math.round(state.settings.strength * 100));
@@ -1229,6 +1390,7 @@
       renderModes();
       renderPresets();
       renderMetadataOptions();
+      renderAudioOptions();
       syncControls();
       renderActions();
 
@@ -1246,7 +1408,15 @@
       const names = [
         ...new Set(config.supported.map((e) => friendly[e] || e.replace(".", "").toUpperCase())),
       ];
-      el.formatsLine.textContent = `Reads ${names.join(", ")}. Redacted copies keep the original format.`;
+      const clipBits = [];
+      if (config.clips && config.clips.enabled) {
+        clipBits.push(
+          `${config.clips.formats.map((e) => e.replace(".", "").toUpperCase()).join(", ")} clips up to ${config.clips.max_seconds}s`
+        );
+      }
+      el.formatsLine.textContent =
+        `Reads ${names.join(", ")}. Redacted copies keep the original format.` +
+        (clipBits.length ? ` Also ${clipBits.join(", ")}; clips come back as MP4.` : "");
     } catch (error) {
       // Photos still work; only the cosmetic chrome is degraded.
       console.error("AmurCloak: could not draw the controls", error);

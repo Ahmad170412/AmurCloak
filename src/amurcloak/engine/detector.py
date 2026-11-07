@@ -57,6 +57,11 @@ class Face:
     score: float
     landmarks: np.ndarray = field(repr=False, default=None)  # (5,2) float32
     rank: float = 0.0  # internal ordering key, not the reported confidence
+    # Video-side fields. Photos never set them; clip masks arrive pre-smoothed,
+    # so the ellipse takes its angle from ``roll`` instead of raw landmarks, and
+    # identity across frames comes from the tracker, not the box.
+    roll: float | None = None  # eye-line angle in degrees, already smoothed
+    track: int | None = None  # tracker id, stable for the lifetime of the clip
 
     @property
     def cx(self) -> float:
@@ -71,22 +76,32 @@ class Face:
         return min(self.w, self.h)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "x": round(self.x, 1),
             "y": round(self.y, 1),
             "w": round(self.w, 1),
             "h": round(self.h, 1),
             "score": round(self.score, 3),
         }
+        if self.track is not None:
+            out["track"] = self.track
+        return out
 
-    def key(self) -> tuple[int, int, int, int]:
-        """Identity for picking a person, derived from the box itself.
+    def key(self) -> tuple[int, int, int, int] | tuple[str, int]:
+        """Identity for picking a person.
 
-        Not a list index: the order detections come back in is an implementation
-        detail, and a stale index would silently un-redact the wrong person. The
-        rounded box is stable for as long as the detection cache holds the same
-        detection, which is exactly the window in which the user is clicking.
+        Photos: derived from the box itself, not from a list index - the order
+        detections come back in is an implementation detail, and a stale index
+        would silently un-redact the wrong person. The rounded box is stable for
+        as long as the detection cache holds the same detection, which is
+        exactly the window in which the user is clicking.
+
+        Clips: the tracked identity. A box is meaningless across frames - the
+        same face moves - so the person is named by their tracker id, which is
+        what "leave this person visible in the whole clip" has to mean.
         """
+        if self.track is not None:
+            return ("t", self.track)
         return (round(self.x), round(self.y), round(self.w), round(self.h))
 
 

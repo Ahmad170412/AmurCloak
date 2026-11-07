@@ -97,11 +97,12 @@
       <div class="dropzone-inner">
         <h1>Redact faces before you share.</h1>
         <p class="lede">
-          Drop photos here, or paste a screenshot. Faces are found and covered
-          on this machine. There is no server to upload to.
+          Drop photos or short clips here, or paste a screenshot. Faces are
+          found and covered on this machine - masks hold still in moving
+          footage. There is no server to upload to.
         </p>
         <div class="dropzone-actions">
-          <button type="button" class="btn btn-primary" id="pick-files">Choose photos</button>
+          <button type="button" class="btn btn-primary" id="pick-files">Choose photos or clips</button>
           <span class="dropzone-hint">or drop them anywhere on this page</span>
         </div>
         <p class="formats" id="formats-line"></p>
@@ -130,6 +131,14 @@
           <button type="button" data-view="audit" class="seg is-on">Audit map</button>
           <button type="button" data-view="result" class="seg">Result</button>
         </div>
+      </div>
+      <!-- The scrub belongs to clips, and shows itself only when one is on
+           screen. Positions are server truth (the frame the preview rendered).
+      -->
+      <div class="scrub" id="scrub" hidden>
+        <input type="range" id="scrub-range" min="0" max="1000" value="0" step="1"
+               aria-label="Where in the clip the preview is">
+        <span class="scrub-time tabnum" id="scrub-time">0:00</span>
       </div>
       <div class="viewer-canvas" id="viewer-canvas">
         <img id="preview-img" alt="Preview of the redaction for the selected photo">
@@ -194,6 +203,12 @@
         <p class="slider-note" id="metadata-note"></p>
       </fieldset>
 
+      <fieldset class="group" id="group-audio-clip" hidden>
+        <legend>Clip audio</legend>
+        <div class="segmented segmented-wide" id="audio-options" role="group" aria-label="What happens to a clip's sound"></div>
+        <p class="slider-note" id="audio-note"></p>
+      </fieldset>
+
     </div>
 
   </aside>
@@ -204,7 +219,7 @@
   <p>Release to redact these photos</p>
 </div>
 
-<input type="file" id="file-input" accept="image/*,.heic,.heif" multiple hidden>
+<input type="file" id="file-input" accept="image/*,.heic,.heif,.mp4,.mov,.m4v,.webm,.mkv,.avi" multiple hidden>
 
 <script src="{{ url_for('static', filename='app.js', v=asset_v) }}"></script>
 </body>

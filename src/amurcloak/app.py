@@ -24,6 +24,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 from flask import (
     Flask,
     abort,
@@ -51,6 +52,8 @@ from .engine.sessions import (
     StorageError,
     ensure_space,
 )
+from .engine.video import probe as video_probe, render as video_render
+from .engine.video.probe import VideoError
 
 CHUNK = 1 << 20
 
@@ -80,6 +83,109 @@ def _detector(settings: presets.Settings) -> FaceDetector:
         detect_edge=settings.detect_edge,
         tiles=settings.tiles,
     )
+
+
+def _decode_frame(source: Path, frame_index: int, width: int, height: int):
+    """One frame, checked for its own truth.
+
+    A frame-seek decode is not quite a guaranteed reconstruction of what the
+    deliverable contains - some containers seek to the nearest keyframe and
+    OpenCV quietly picks that. The mask geometry it carries, however, is the
+    exact one the export will paint, so the map on screen is the truth even
+    where the underlying pixels could differ by a frame.
+    """
+    del width, height  # the shape comes from the decode itself
+    cap = video_probe.open_capture(source)
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        if not ok and frame_index > 0:
+            # A seek the decoder politely refused: fall back to frame zero so a
+            # scrub never blanks out because of a container quirk.
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+        if not ok:
+            raise video_probe.VideoError("that frame could not be read from the clip")
+        return frame
+    finally:
+        cap.release()
+
+
+def _clip_preview(session, item, index: int, view: str, t: float):
+    """The clip preview: one frame, plus the scan's progress when there is none.
+
+    Protocol: while the background scan is running the route answers
+    ``{"scanning": true, "progress": ...}`` with no image, and the page keeps
+    asking. That split is why a first scrub never blocks a request for a minute.
+    """
+    started = time.perf_counter()
+    scan = session.clip_scan(item)
+
+    if scan.state not in ("running", "done"):
+        # None, or an earlier scan failed - (re)start it in the background.
+        scan = session.request_clip_scan(item, video_render.clip_detector(session.settings))
+
+    if scan.state != "done":
+        payload = {
+            "index": index,
+            "view": view,
+            "scanning": True,
+            "progress": round(scan.progress, 3),
+        }
+        if scan.state == "error":
+            payload["scan_error"] = scan.error
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    frames_cap = len(scan.masks)
+    if frames_cap == 0:
+        return jsonify({"error": "the clip holds no readable frames"}), 422
+
+    # The rate the scan measured, so a scrub lands on the frame the scan
+    # recorded rather than on the container's claim about the rate.
+    fps = scan.fps or float(item.meta.get("fps") or 30) or 30.0
+    frame_index = max(0, min(int(t * fps), frames_cap - 1))
+    source = session.in_dir / item.stored
+    try:
+        frame = _decode_frame(source, frame_index, 0, 0)
+    except video_probe.VideoError as exc:
+        return jsonify({"error": str(exc), "index": index}), 422
+
+    settings = session.settings
+    width = frame.shape[1]
+    height = frame.shape[0]
+    decoded = photo_io.Photo(
+        bgr=frame, alpha=None, icc=None, source_ext=Path(item.stored).suffix,
+        width=width, height=height,
+    )
+
+    with session.lock:
+        restored_keys = set(item.restored)
+    masks_here = scan.masks[frame_index]
+    covered = [m.to_face() for m in masks_here if m.track not in restored_keys]
+    kept = [m.to_face() for m in masks_here if m.track in restored_keys]
+    kept_keys = frozenset(f.key() for f in kept)
+
+    image = pipeline.render_preview_bytes(decoded, covered, settings, view, restored=kept)
+    report = pipeline.scene_report(covered + kept, settings, decoded, kept_keys)
+    report.update(
+        {
+            "index": index,
+            "view": view,
+            "name": item.name,
+            "meta": item.meta,
+            "image": base64.b64encode(image).decode("ascii"),
+            "t": frame_index / fps,
+            "frame": frame_index,
+            "frames": frames_cap,
+            "fps": fps,
+            "ms": int((time.perf_counter() - started) * 1000),
+        }
+    )
+    response = jsonify(report)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def create_app(config: Config | None = None):
@@ -152,6 +258,11 @@ def create_app(config: Config | None = None):
                     "max_file_bytes": MAX_FILE_BYTES,
                     "max_session_bytes": MAX_SESSION_BYTES,
                 },
+                "clips": {
+                    "enabled": video_probe.binary_available(),
+                    "max_seconds": int(video_probe.MAX_CLIP_SEC),
+                    "formats": sorted(video_probe.SUPPORTED_VIDEO),
+                },
                 "usage": store.usage(),
                 "supported": sorted(photo_io.SUPPORTED_IN),
                 "heif": photo_io.HEIF_AVAILABLE,
@@ -223,13 +334,16 @@ def create_app(config: Config | None = None):
             stored = f"{index:04d}{extension}"
 
             item = Item(name=original, stored=stored)
-            if extension not in photo_io.SUPPORTED_IN:
+            if extension not in photo_io.SUPPORTED_IN and not video_probe.is_video(original):
                 item.status = "error"
                 item.error = (
-                    f"{extension or 'no extension'} is not a supported image format"
+                    f"{extension or 'no extension'} is not a supported image or clip format"
                 )
                 session.items.append(item)
                 continue
+
+            if video_probe.is_video(original):
+                item.kind = "video"
 
             destination = session.in_dir / stored
             size = 0
@@ -264,8 +378,25 @@ def create_app(config: Config | None = None):
                 session.items.append(item)
                 continue
 
+            if item.kind == "video":
+                # A clip that fails its probe is refused here, before any
+                # preview can promise things about it. The staged copy does not
+                # survive the refusal: it can never be rendered, and it is the
+                # biggest single file in the batch precisely when it fails.
+                try:
+                    info = video_probe.probe(destination)
+                except VideoError as exc:
+                    destination.unlink(missing_ok=True)
+                    item.status = "error"
+                    item.error = str(exc)
+                    session.items.append(item)
+                    continue
+                item.meta = info.to_dict()
+                item.width = info.width
+                item.height = info.height
+            else:
+                item.meta = photo_io.probe_metadata(destination)
             item.size = size
-            item.meta = photo_io.probe_metadata(destination)
             session.items.append(item)
 
         session.bytes_in = total
@@ -332,6 +463,10 @@ def create_app(config: Config | None = None):
         index = max(0, min(index, len(session.items) - 1))
         item = session.items[index]
 
+        if item.kind == "video":
+            t = request.args.get("t", 0.0, type=float)
+            return _clip_preview(session, item, index, view, t)
+
         settings = session.settings
         detector = _detector(settings)
         started = time.perf_counter()
@@ -370,7 +505,7 @@ def create_app(config: Config | None = None):
         if session is None:
             abort(404)
         if not any(item.status != "error" for item in session.items):
-            return jsonify({"error": "there are no photos here to redact"}), 400
+            return jsonify({"error": "there are no photos or clips here to redact"}), 400
         renderer.submit(session)
         return jsonify(session.snapshot()), 202
 

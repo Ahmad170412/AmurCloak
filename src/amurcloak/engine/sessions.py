@@ -34,6 +34,8 @@ from pathlib import Path
 from . import photo as photo_io, redact
 from .detector import Face, FaceDetector
 from .presets import Settings, build as build_settings
+from .video import probe as video_probe, render as video_render, track as video_track
+from .video.probe import VideoError
 
 # ---------------------------------------------------------------------------
 # limits
@@ -61,6 +63,30 @@ PHOTO_CACHE_ENTRIES = 2
 
 class StorageError(Exception):
     """Not enough room, or a limit would be exceeded. Message is user-facing."""
+
+
+@dataclass
+class ClipScan:
+    """Everything a clip has produced so far, minus its pixels.
+
+    A clip's scan runs in the background the first time it is previewed or
+    rendered: at 25ms a frame it can take a minute of a long clip, and neither
+    the preview request that started it nor anyone else should sit on it. So
+    the entry carries its own state machine and a completion event the render
+    worker can wait on. What is *kept* is only detections and masks - lookups
+    for rendering are index reads, never rework.
+    """
+
+    state: str = "none"  # none | running | done | error
+    progress: float = 0.0
+    error: str | None = None
+    # Frame rate measured from the decode clock, or 0.0 when it was not
+    # measurable. The render encodes at this rather than the container's claim.
+    fps: float = 0.0
+    # Per-frame detections from pass A, in frame order.
+    frames: list[list[Face]] = field(default_factory=list)
+    # Tracker output: per-frame masks, same indexing; what render and preview read.
+    masks: list[list[video_track.Mask]] = field(default_factory=list)
 
 
 def free_bytes(path: str | Path) -> int:
@@ -136,8 +162,11 @@ class Item:
     stored: str  # filename inside the staging dir
     size: int = 0
     status: str = "staged"  # staged | done | error
+    kind: str = "photo"  # photo | video
     faces: int = 0
     scanned: bool = False  # whether detection has run on this file yet
+    scan_state: str = "idle"  # idle | running | done | error (clips run in the background)
+    scan_progress: float = 0.0
     out_name: str | None = None
     out_size: int = 0
     ms: int = 0
@@ -146,17 +175,21 @@ class Item:
     width: int = 0
     height: int = 0
     # Face keys the user clicked to leave visible. Per item, and never carried
-    # between photos: two people are only "the same person" to face recognition,
-    # which this tool deliberately does not do.
-    restored: set[tuple[int, int, int, int]] = field(default_factory=set)
+    # between files: two people are only "the same person" to face recognition,
+    # which this tool deliberately does not do. Photos: rounded boxes. Clips:
+    # the 4-tuple ("t", track_id) naming a whole tracked person.
+    restored: set[tuple[int | str, ...]] = field(default_factory=set)
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
             "size": self.size,
             "status": self.status,
+            "kind": self.kind,
             "faces": self.faces,
             "scanned": self.scanned,
+            "scan_state": self.scan_state,
+            "scan_progress": round(self.scan_progress, 3),
             "out_name": self.out_name,
             "out_size": self.out_size,
             "ms": self.ms,
@@ -193,6 +226,11 @@ class Session:
         self.io_lock = threading.Lock()
         self._photos: dict[str, photo_io.Photo] = {}
         self._detections: dict[str, list[Face]] = {}
+        # Per-clip scan state. The decoded clips themselves never enter RAM -
+        # these entries hold only per-frame detections and the tracker's masks,
+        # which is kilobytes - plus liveness flags for the background scan.
+        self._clips: dict[str, ClipScan] = {}
+        self._clip_events: dict[str, threading.Event] = {}
 
     # -- lifecycle --------------------------------------------------------
 
@@ -257,8 +295,26 @@ class Session:
             return faces
 
     def forget_detections(self) -> None:
+        """Drop when detection settings changed.
+
+        Covers both kinds: photo detections, and clip scans - including one
+        running in the background. An in-flight scan detects with the *old*
+        settings, so its outputs must not survive: the worker publishes only
+        into the entry that is still current, and clearing the dict here forces
+        the next preview to start a fresh scan against the new settings.
+        """
         with self.lock:
             self._detections.clear()
+            clips = list(self._clips.items())
+            self._clips.clear()
+            self._clip_events.clear()
+        for stored, _scan in clips:
+            item = next((i for i in self.items if i.stored == stored), None)
+            if item is not None and item.kind == "video":
+                item.scanned = False
+                item.faces = 0
+                item.scan_state = "idle"
+                item.scan_progress = 0.0
 
     def covered(self, item: Item, detector: FaceDetector) -> list[Face]:
         """The faces that will actually be masked: detections minus the restored.
@@ -288,6 +344,12 @@ class Session:
             return "no such photo in this batch"
         item = self.items[index]
 
+        if isinstance(key, (list, tuple)) and len(key) == 2 and key[0] == "t":
+            return self._set_track_restored(item, key[1], restore)
+        return self._set_box_restored(item, key, restore)
+
+    def _set_box_restored(self, item: Item, key: object, restore: bool) -> str | None:
+        """The stills side of set_restored: one detected box on one photo."""
         if not isinstance(key, (list, tuple)) or len(key) != 4:
             return "a face key must be four numbers"
         try:
@@ -304,6 +366,8 @@ class Session:
         if not any(face.key() == wanted for face in detected):
             return "no such face in this photo"
 
+        # A clip's restored names are tracker ids, and they are checked against
+        # the scan that is actually on file rather than trusted either.
         with self.lock:
             if restore:
                 item.restored.add(wanted)
@@ -311,6 +375,197 @@ class Session:
                 item.restored.discard(wanted)
             self._drop_result_locked()
         return None
+
+    # -- clip scans --------------------------------------------------------
+
+    def _set_track_restored(self, item: Item, raw: object, restore: bool) -> str | None:
+        """The clip side of set_restored: name a tracked person, not a frame.
+
+        One click means "this person keeps their pixels in the whole clip", so
+        the id, not any frame's box, is what is stored.
+        """
+        try:
+            wanted = int(raw)
+        except (TypeError, ValueError):
+            return "a face key must be four numbers"
+
+        with self.lock:
+            scan = self._clips.get(item.stored)
+            present = {mask.track for row in scan.masks for mask in row} if scan else set()
+        if scan is None or scan.state != "done":
+            return "this clip has not been scanned yet"
+        if wanted not in present:
+            return "no such face in this clip"
+
+        with self.lock:
+            if restore:
+                item.restored.add(("t", wanted))
+            else:
+                item.restored.discard(("t", wanted))
+            self._drop_result_locked()
+        return None
+
+    def clip_scan(self, item: Item) -> ClipScan:
+        """The scan entry for a clip item, created empty on first touch."""
+        with self.lock:
+            return self._clips.setdefault(item.stored, ClipScan())
+
+    def request_clip_scan(self, item: Item, detector: FaceDetector) -> ClipScan:
+        """Start the background scan unless one is already running or done.
+
+        Returns whatever state the entry is in; the preview route reads it and
+        either serves frames or tells the page "scanning". Only ever starts one
+        thread per clip per cache lifetime.
+        """
+        with self.lock:
+            scan = self._clips.setdefault(item.stored, ClipScan())
+            if scan.state in ("running", "done"):
+                return scan
+            if scan.state == "error":
+                # A failed scan is retried on demand: transients (disk sleep,
+                # a size race) deserve another chance, and the route that
+                # notices never has to explain a permanent state.
+                pass
+            scan.state = "running"
+            scan.error = None
+            scan.progress = 0.0
+            item.scan_state = "running"
+            item.scan_progress = 0.0
+            event = threading.Event()
+            self._clip_events[item.stored] = event
+            worker = threading.Thread(
+                target=self._clip_scan_worker,
+                args=(item, detector, scan, event),
+                name=f"amurcloak-clip-{item.stored}",
+                daemon=True,
+            )
+            worker.start()
+            return scan
+
+    def wait_for_clip_scan(self, item: Item) -> ClipScan:
+        """Block until the background scan for this clip settles. None on entry."""
+        with self.lock:
+            event = self._clip_events.get(item.stored)
+        if event is not None:
+            event.wait()
+        return self._clips.get(item.stored) or self.clip_scan(item)
+
+    def ensure_clip_done(
+        self, item: Item, detector: FaceDetector, on_progress=None
+    ) -> ClipScan:
+        """A finished scan for this clip, one way or another.
+
+        Running in the background? Wait for it. Already done? Hand it back.
+        Failed? Say so. Otherwise - the render worker path, where no preview
+        has ever started a scan - run it inline, serialised on ``io_lock`` so
+        two clips in one batch cannot race each other's decoder.
+        """
+        with self.lock:
+            scan = self._clips.setdefault(item.stored, ClipScan())
+            event = self._clip_events.get(item.stored) if scan.state == "running" else None
+        if event is not None:
+            event.wait()
+
+        if scan.state == "done":
+            return scan
+        if scan.state == "error":
+            raise VideoError(scan.error or "the clip scan failed")
+
+        # A scan nobody started. Run it here, under the same io_lock the photo
+        # detection path uses, and publish as the worker would.
+        with self.io_lock:
+            with self.lock:
+                if scan.state == "done":
+                    return scan
+                scan.state = "running"
+                scan.error = None
+                scan.progress = 0.0
+                item.scan_state = "running"
+                event = threading.Event()
+                self._clip_events[item.stored] = event
+            source = self.in_dir / item.stored
+            try:
+                frames, measured_fps = video_render.scan_frames(
+                    source,
+                    detector,
+                    on_progress=on_progress,
+                    total_frames=int(item.meta.get("frames") or 0),
+                )
+                masks = video_track.build_masks(frames)
+            except Exception as exc:  # a failed scan is a reported state
+                with self.lock:
+                    scan.state = "error"
+                    scan.error = str(exc)
+                    item.scan_state = "error"
+                    item.error = str(exc)
+                event.set()
+                raise
+            self._publish_clip(item, scan, frames, masks, measured_fps)
+            event.set()
+            return scan
+
+    def _publish_clip(
+        self,
+        item: Item,
+        scan: ClipScan,
+        frames: list[list[Face]],
+        masks: list[list[video_track.Mask]],
+        measured_fps: float,
+    ) -> None:
+        """Publish scan results into the entry that is still current.
+
+        The guard matters because a settings change clears the scan cache and
+        spawns a replacement scan while an old one may still be running; the
+        loser's outputs must never be mistaken for fresh ones.
+        """
+        with self.lock:
+            if self._clips.get(item.stored) is not scan:
+                return
+            scan.frames = frames
+            scan.masks = masks
+            scan.fps = measured_fps
+            scan.state = "done"
+            scan.progress = 1.0
+            item.faces = video_track.count_tracks(masks)
+            item.scanned = True
+            item.width = int(item.meta.get("width") or 0)
+            item.height = int(item.meta.get("height") or 0)
+            item.scan_state = "done"
+            item.error = None
+
+    def _clip_scan_worker(
+        self, item: Item, detector: FaceDetector, scan: ClipScan, event: threading.Event
+    ) -> None:
+        """The background half. Publishes progress, never raises."""
+        source = self.in_dir / item.stored
+
+        def progress(fraction: float) -> None:
+            scan.progress = fraction
+            item.scan_progress = fraction
+
+        try:
+            frames, measured_fps = video_render.scan_frames(
+                source,
+                detector,
+                on_progress=progress,
+                total_frames=int(item.meta.get("frames") or 0),
+            )
+            masks = video_track.build_masks(frames)
+        except Exception as exc:  # noqa: BLE001 - recorded on the session, never swallowed silently
+            with self.lock:
+                # A settings change may have cleared the cache and started a new
+                # scan while this one worked; only publish into the entry that
+                # is still current, and leave the new scan's event alone.
+                if self._clips.get(item.stored) is scan:
+                    scan.state = "error"
+                    scan.error = str(exc)
+                    item.scan_state = "error"
+                    item.error = str(exc)
+            event.set()
+            return
+
+        self._publish_clip(item, scan, frames, masks, measured_fps)
+        event.set()
 
     def _drop_result_locked(self) -> None:
         """Discard any rendered result. Caller holds the lock.
@@ -380,6 +635,16 @@ class Session:
             self.in_dir.mkdir(parents=True, exist_ok=True)
             self._photos.clear()
             self._detections.clear()
+            # Clips: frames were never in RAM, but the masks describe frames
+            # that can no longer be read - a re-render needs a re-scan.
+            self._clips.clear()
+            self._clip_events.clear()
+            for item in self.items:
+                if item.kind == "video":
+                    item.scanned = False
+                    item.faces = 0
+                    item.scan_state = "idle"
+                    item.scan_progress = 0.0
             return freed
 
     # -- reporting --------------------------------------------------------
@@ -629,39 +894,60 @@ class Renderer:
         taken: set[str] = set()
 
         try:
-            for item in renderable:
+            for position, item in enumerate(renderable):
                 started = time.perf_counter()
-                try:
-                    decoded = session.load_photo(item)
-                    faces = session.covered(item, detector)
 
-                    if item.out_name is None or item.out_name in taken:
-                        item.out_name = photo_io.unique_output_name(
-                            item.name, decoded.alpha is not None, taken
-                        )
-                    else:
+                # A clip's progress is fractional so the bar tracks the frame
+                # it is actually on, not a full step per item that sits at zero
+                # for a minute. Photos keep their whole numbers; they share the
+                # same scale, items out of len(renderable).
+                def advance(fraction: float, position=position) -> None:
+                    with session.lock:
+                        session.progress = min(position + fraction, len(renderable))
+
+                try:
+                    if item.kind == "video":
+                        out_name = video_probe.unique_output_name(item.name, taken)
+                        # Keep the name the preview already showed, unless the
+                        # collision set has claimed it since.
+                        if item.out_name is None or item.out_name in taken:
+                            item.out_name = out_name
                         taken.add(item.out_name)
 
-                    redact.apply_redaction(
-                        decoded.bgr,
-                        faces,
-                        session.settings.mode,
-                        session.settings.margin,
-                        session.settings.strength,
-                    )
+                        out_path = session.out_dir / item.out_name
+                        self._render_clip(session, item, out_path, advance)
+                        out_size = out_path.stat().st_size
+                    else:
+                        decoded = session.load_photo(item)
+                        faces = session.covered(item, detector)
 
-                    out_path = session.out_dir / item.out_name
-                    photo_io.save_photo(
-                        out_path,
-                        decoded.bgr,
-                        decoded.alpha,
-                        decoded.icc if not session.settings.strip_exif else None,
-                        quality=session.settings.quality,
-                        keep_icc=not session.settings.strip_exif,
-                        metadata=session.settings.metadata,
-                        spoof_when=session.settings.spoof_when,
-                    )
-                    out_size = out_path.stat().st_size
+                        if item.out_name is None or item.out_name in taken:
+                            item.out_name = photo_io.unique_output_name(
+                                item.name, decoded.alpha is not None, taken
+                            )
+                        else:
+                            taken.add(item.out_name)
+
+                        redact.apply_redaction(
+                            decoded.bgr,
+                            faces,
+                            session.settings.mode,
+                            session.settings.margin,
+                            session.settings.strength,
+                        )
+
+                        out_path = session.out_dir / item.out_name
+                        photo_io.save_photo(
+                            out_path,
+                            decoded.bgr,
+                            decoded.alpha,
+                            decoded.icc if not session.settings.strip_exif else None,
+                            quality=session.settings.quality,
+                            keep_icc=not session.settings.strip_exif,
+                            metadata=session.settings.metadata,
+                            spoof_when=session.settings.spoof_when,
+                        )
+                        out_size = out_path.stat().st_size
 
                     if zf is not None:
                         # Append then remove, so the batch never exists twice on
@@ -672,11 +958,14 @@ class Renderer:
 
                     with session.lock:
                         item.status = "done"
-                        item.faces = len(faces)
-                        item.scanned = True
+                        if item.kind != "video":
+                            # Photos: the covered count already reflects any
+                            # "leave visible" choice, exactly as 0.9 did.
+                            item.scanned = True
+                            item.faces = len(faces)
                         item.out_size = out_size
                         item.ms = int((time.perf_counter() - started) * 1000)
-                        session.progress = min(session.progress + 1, len(renderable))
+                        session.progress = min(position + 1, len(renderable))
                         session.touch()
 
                 except Exception as exc:  # noqa: BLE001
@@ -684,7 +973,7 @@ class Renderer:
                         item.status = "error"
                         item.error = str(exc)
                         item.ms = int((time.perf_counter() - started) * 1000)
-                        session.progress = min(session.progress + 1, len(renderable))
+                        session.progress = min(position + 1, len(renderable))
                         session.touch()
 
             if zf is not None:
@@ -740,3 +1029,77 @@ class Renderer:
                 if session.state == "error" and session.out_dir.exists():
                     shutil.rmtree(session.out_dir, ignore_errors=True)
                     session.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _render_clip(
+        self,
+        session: Session,
+        item: Item,
+        out_path: Path,
+        advance,
+    ) -> None:
+        """One clip through both passes.
+
+        The scan is shared with the preview path - same cache, same entry -
+        so a clip someone has been scrubbing renders immediately.
+        """
+        source = session.in_dir / item.stored
+        info = self._clip_geometry(item, source)
+
+        def scan_progress(fraction: float) -> None:
+            advance(fraction * 0.5)
+
+        detector = video_render.clip_detector(session.settings)
+        scan = session.ensure_clip_done(item, detector, on_progress=scan_progress)
+
+        # The rate measured while scanning, not the container's claim: a
+        # variable-rate or mislabelled file would otherwise encode at the wrong
+        # rate and drift away from its own audio.
+        fps = scan.fps or info.fps
+
+        def render_progress(fraction: float) -> None:
+            # Pass B owns the second half of this item's slice. When the scan
+            # was served from cache the first half never spent wall time here,
+            # and that is allowed to be visible in the bar's rate.
+            advance(0.5 + fraction * 0.5)
+
+        # The people the user clicked to leave visible. Read once, at the start,
+        # rather than per frame: the export has to be one decision, and it has to
+        # be the same one the preview made. Photo keys are four numbers, so a
+        # track id is only ever behind the "t" marker.
+        with session.lock:
+            restored_tracks = frozenset(
+                key[1] for key in item.restored if key and key[0] == "t"
+            )
+
+        video_render.render_to_disk(
+            source,
+            out_path,
+            scan.masks,
+            session.settings,
+            fps=fps,
+            width=info.width,
+            height=info.height,
+            on_progress=render_progress,
+            restored_tracks=restored_tracks,
+        )
+
+    @staticmethod
+    def _clip_geometry(item: Item, source: Path):
+        """fps and dimensions from the upload probe, or a fresh probe."""
+        fps = float(item.meta.get("fps") or 0)
+        width = int(item.meta.get("width") or 0)
+        height = int(item.meta.get("height") or 0)
+        if fps <= 0 or width <= 0 or height <= 0:
+            info = video_probe.probe(source)
+            item.meta.update(info.to_dict())
+            item.width = info.width
+            item.height = info.height
+            return info
+        return video_probe.ClipInfo(
+            fps=fps,
+            width=width,
+            height=height,
+            frame_count=int(item.meta.get("frames") or 0),
+            duration=float(item.meta.get("duration") or 0.0),
+            has_audio=bool(item.meta.get("has_audio")),
+        )

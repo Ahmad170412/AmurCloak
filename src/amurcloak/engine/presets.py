@@ -174,6 +174,7 @@ class Settings:
     quality: int = DEFAULT_QUALITY
     metadata: str = DEFAULT_METADATA
     spoof_when: str = DEFAULT_SPOOF_WHEN
+    keep_audio: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -194,6 +195,7 @@ def build(
     quality: int | None = None,
     metadata: str | None = None,
     spoof_when: str | None = None,
+    keep_audio: bool | None = None,
 ) -> Settings:
     """Resolve a preset into a Settings object, applying explicit overrides."""
     p = PRESETS.get(preset, PRESETS[DEFAULT_PRESET])
@@ -225,6 +227,8 @@ def build(
     when = normalize_when(spoof_when)
     if when is not None:
         settings.spoof_when = when
+    if keep_audio is not None:
+        settings.keep_audio = bool(keep_audio)
 
     return settings
 
@@ -300,6 +304,7 @@ def from_payload(payload: dict) -> Settings:
         quality=_num("quality"),
         metadata=metadata,
         spoof_when=payload.get("spoof_when"),
+        keep_audio=_flag("keep_audio"),
     )
 
 
@@ -327,6 +332,7 @@ def catalog() -> dict:
             "strip_exif": True,
             "metadata": DEFAULT_METADATA,
             "spoof_when": DEFAULT_SPOOF_WHEN,
+            "keep_audio": True,
         },
         # The forged identity is fixed, not configurable: a made-up camera is
         # harmless, but a made-up location that the user could type is a location

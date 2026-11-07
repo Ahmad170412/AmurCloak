@@ -1,5 +1,6 @@
-# AmurCloak runtime dependencies. Deliberately tiny - no torch, no onnxruntime,
-# no ffmpeg binary.
+# AmurCloak runtime dependencies. Deliberately tiny - no torch, no onnxruntime.
+# imageio-ffmpeg is the exception (it ships a static ffmpeg for clip output and
+# its audio track); see pyproject.toml for the reasoning.
 #
 # pyproject.toml is the source of truth, because that is what uv installs from.
 # This file exists for anyone using plain pip instead. Keep the two in step.
@@ -8,3 +9,4 @@ numpy>=1.26
 flask>=3.0
 pillow>=10.0
 pillow-heif>=0.16
+imageio-ffmpeg>=0.5

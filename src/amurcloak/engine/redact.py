@@ -48,17 +48,27 @@ class Ellipse:
 
 
 def ellipse_from_face(face: Face, margin: float) -> Ellipse:
-    """Fit a redaction ellipse to a detection, including head roll."""
+    """Fit a redaction ellipse to a detection, including head roll.
+
+    The angle comes from one of two places. A still frame derives it here from
+    the eye landmarks; a clip frame carries it in ``face.roll`` - already
+    smoothed by the tracker over time, because a raw per-frame landmark angle
+    jitters and a jittering mask edge reads as video noise rather than as a
+    deliberate cover.
+    """
     ax = max(2.0, face.w / 2.0 * (1.0 + margin * 2.0))
     ay = max(2.0, face.h / 2.0 * (1.0 + margin * VERTICAL_EXTRA * 2.0))
 
     angle = 0.0
-    landmarks = face.landmarks
-    if landmarks is not None and len(landmarks) >= 2:
-        (ex1, ey1), (ex2, ey2) = landmarks[0], landmarks[1]
-        angle = math.degrees(math.atan2(float(ey2 - ey1), float(ex2 - ex1)))
-        if not math.isfinite(angle) or abs(angle) > MAX_ROLL_DEG:
-            angle = 0.0
+    if face.roll is not None:
+        angle = face.roll
+    else:
+        landmarks = face.landmarks
+        if landmarks is not None and len(landmarks) >= 2:
+            (ex1, ey1), (ex2, ey2) = landmarks[0], landmarks[1]
+            angle = math.degrees(math.atan2(float(ey2 - ey1), float(ex2 - ex1)))
+    if not math.isfinite(angle) or abs(angle) > MAX_ROLL_DEG:
+        angle = 0.0
 
     return Ellipse(face.cx, face.cy, ax, ay, angle)
 
