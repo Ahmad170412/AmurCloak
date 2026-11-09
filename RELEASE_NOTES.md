@@ -1,4 +1,4 @@
-# AmurCloak 0.10.0
+# AmurCloak 1.0.0
 
 Redact short clips as well as photos. Faces are tracked across frames so the
 cover follows a moving person, audio is kept by default with an off switch, and

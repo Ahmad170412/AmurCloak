@@ -70,13 +70,13 @@ The same workspace after dark, switched to the result view. It follows your syst
 **One paste.** This installs [uv](https://docs.astral.sh/uv/) — which brings its own Python — and then AmurCloak itself, straight from a release. The `export` is there so it works in the terminal you already have open, with no restart:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-0.9.0-py3-none-any.whl
+curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
 ```
 
 Windows, in PowerShell — same idea:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-0.9.0-py3-none-any.whl
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"; $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"; uv tool install https://github.com/Ahmad170412/AmurCloak/releases/latest/download/amurcloak-1.0.0-py3-none-any.whl
 ```
 
 **Then, forever after:**
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 amurcloak
 ```
 
-That wheel is the entire install — one file, and the same one on macOS, Windows and Linux, with every dependency resolved for your machine. GitHub Releases is the only published channel for now; AmurCloak is not on PyPI yet.
+That wheel is the entire install — one file, and the same one on macOS, Windows and Linux, with every dependency resolved for your machine. AmurCloak is published to both GitHub Releases and PyPI, so `uv tool install amurcloak` and `uv tool upgrade amurcloak` now work as usual.
 
 It takes the first free port from 5000, opens your browser, and stops on Control-C. Run it a second time and it notices the copy already running instead of starting another server.
 
@@ -180,7 +180,7 @@ The Quick Start above is the whole thing. Two other routes, if you want them:
 ```bash
 git clone https://github.com/Ahmad170412/AmurCloak.git
 cd AmurCloak && uv tool install .                       # from a checkout
-uv tool install dist/amurcloak-0.9.0-py3-none-any.whl   # from a wheel you built
+uv tool install dist/amurcloak-1.0.0-py3-none-any.whl   # from a wheel you built
 ```
 
 Re-running the Quick Start install command with the new version's wheel filename upgrades in place; `uv tool install` replaces the existing environment. Removing is one command:
@@ -189,7 +189,7 @@ Re-running the Quick Start install command with the new version's wheel filename
 uv tool uninstall amurcloak
 ```
 
-`uv tool upgrade amurcloak` is deliberately not the upgrade instruction here. uv remembers the exact requirement an install was given, and a URL names `0.9.0` — so an upgrade would keep resolving `0.9.0` rather than looking for a newer release. If AmurCloak is published to PyPI later, both `uv tool install amurcloak` and `uv tool upgrade amurcloak` will work as usual.
+`uv tool upgrade amurcloak` is deliberately not the upgrade instruction here. uv remembers the exact requirement an install was given, and a URL names `1.0.0` — so an upgrade would keep resolving `1.0.0` rather than looking for a newer release. AmurCloak is now on PyPI, so both `uv tool install amurcloak` and `uv tool upgrade amurcloak` work as usual.
 
 `uv tool install` gives each tool its own isolated environment and drops a small shim on your `PATH`. It does not touch your system Python, and uninstalling leaves nothing behind.
 
