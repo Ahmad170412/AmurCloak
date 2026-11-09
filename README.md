@@ -4,20 +4,20 @@
 
 # AmurCloak
 
-**Find every face in a photo and cover it — on your own machine, with the network unplugged.**
+**Find every face in a photo or short clip and cover it — on your own machine, with the network unplugged.**
 
 No uploads, no accounts, no telemetry. Drop photos in, check the map, download redacted copies.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000)](#requirements)
 [![Install](https://img.shields.io/badge/install-uv%20tool%20install-de5fe9)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-40%20passing-3f6b52)](#testing)
+[![Tests](https://img.shields.io/badge/tests-57%20passing-3f6b52)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-97ca00)](LICENSE)
-[![Dependencies](https://img.shields.io/badge/dependencies-5-5d6e79)](#requirements)
+[![Dependencies](https://img.shields.io/badge/dependencies-6-5d6e79)](#requirements)
 [![Network](https://img.shields.io/badge/network-none%20at%20runtime-c97a2b)](#why-amurcloak)
 [![Detector](https://img.shields.io/badge/detector-YuNet%20227%20KB-17202a)](src/amurcloak/models/)
 
-[Quick Start](#quick-start) · [Why](#why-amurcloak) · [Features](#features) · [Configuration](#configuration) · [Testing](#testing)
+[Quick Start](#quick-start) · [Features](#features) · [Configuration](#configuration) · [Testing](#testing) · [Report a bug](https://github.com/Ahmad170412/AmurCloak/issues) · [Request a feature](https://github.com/Ahmad170412/AmurCloak/issues)
 
 </div>
 
@@ -50,6 +50,8 @@ The same workspace after dark, switched to the result view. It follows your syst
 
 ## Table of Contents
 
+- [Why AmurCloak?](#why-amurcloak)
+- [What it looks like](#what-it-looks-like)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Features](#features)
@@ -132,6 +134,7 @@ A single process, one request at a time, no queue and no worker pool:
 
 | Feature | Description |
 |---|---|
+| **Short clips** | Redact faces in short video clips, with the cover following the face across frames; audio kept or dropped on request. |
 | **Three redaction modes** | Solid black, pixelate, and blur — with an honest note on which are reversible. |
 | **Tiled detection** | Overlapping crops recover small faces that a single full-frame pass misses. |
 | **Audit map** | Annotated preview with numbered boxes, landmark-fitted ellipses, and per-face confidence, so you can verify coverage before rendering. |
@@ -157,7 +160,7 @@ A single process, one request at a time, no queue and no worker pool:
 - **~250 MB on first run**, almost all of it OpenCV, into uv's shared cache. Reinstalling, or any other uv project, reuses it.
 - **One download, ever.** After the first run the command works with the network off.
 
-Five dependencies, all prebuilt wheels, none of them a framework:
+Six dependencies, all prebuilt wheels, none of them a framework:
 
 | Package | Why |
 |---|---|
@@ -166,8 +169,9 @@ Five dependencies, all prebuilt wheels, none of them a framework:
 | `flask` | the local web interface |
 | `pillow` | decode, encode, EXIF |
 | `pillow-heif` | iPhone HEIC/HEIF |
+| `imageio-ffmpeg` | static ffmpeg binary for muxing clip audio and H.264 output |
 
-Deliberately absent: **PyTorch**, **onnxruntime**, and any **ffmpeg** binary. YuNet runs through the DNN module OpenCV already ships, which is why the model is 227 KB instead of hundreds of megabytes.
+Deliberately absent: **PyTorch** and **onnxruntime**. YuNet runs through the DNN module OpenCV already ships, which is why the model is 227 KB instead of hundreds of megabytes. The one native binary that is present, ffmpeg, arrives inside the `imageio-ffmpeg` wheel rather than from the system, so the runtime network posture is unchanged.
 
 ### Install
 
@@ -311,11 +315,12 @@ Detection is tens of milliseconds on a phone-sized photo, and a few hundred mill
 
 ## Testing
 
-Two suites, no test framework, no fixtures to download:
+Three suites, no test framework, no fixtures to download:
 
 ```bash
 uv run python tests/test_engine.py   # 18/18 — detection, masking, colour, metadata, formats
 uv run python tests/test_api.py      # 22/22 — upload, tune, preview, render, download, disk
+uv run python tests/test_video.py    # 17/17 — clip probe, tracking, render, audio, end-to-end
 ```
 
 The API suite drives the real Flask app through its test client, so it covers the actual routes rather than mocks. Its last four checks fetch the page, the script and the stylesheet and compare them against each other.
@@ -374,6 +379,7 @@ AmurCloak/
 └── tests/
     ├── test_engine.py            # 18 tests
     ├── test_api.py               # 22 tests
+    ├── test_video.py             # 17 tests
     └── fixtures/                 # lena.jpg, plus fixtures built on demand
 ```
 

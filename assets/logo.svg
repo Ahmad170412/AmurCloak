@@ -32,7 +32,7 @@
 
   <line x1="77" y1="47" x2="196" y2="47" stroke="#3a4a59" stroke-width="1"/>
 
-  <text x="77" y="63" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="9" letter-spacing="0.2" fill="#8698a3">local face redaction for photos</text>
+  <text x="77" y="63" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="9" letter-spacing="0.2" fill="#8698a3">local face redaction for photos and clips</text>
 
   <rect x="222" y="26" width="82" height="19" rx="9.5" fill="#c97a2b" fill-opacity="0.14" stroke="#c97a2b" stroke-opacity="0.45"/>
   <circle cx="234" cy="35.5" r="3" fill="#3f6b52"/>

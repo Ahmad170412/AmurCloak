@@ -1,3 +1,26 @@
+# AmurCloak 0.10.0
+
+Redact short clips as well as photos. Faces are tracked across frames so the
+cover follows a moving person, audio is kept by default with an off switch, and
+a person you leave visible stays visible in the export. The clip path shares the
+same audit-map, settings and metadata rules as the photo path.
+
+## In this release
+
+- **Short clips.** Upload `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv` or `.avi`;
+  faces are detected per frame, tracked with identity persistence, and covered
+  with the same roll-aware masks as photos.
+- **Tracking that follows the face.** A face walking across the frame keeps one
+  identity, and a detector gap widens the cover along the motion instead of
+  freezing it.
+- **Leave a person visible, per clip.** Click a covered face to spare that
+  tracked person; the choice is recorded by track id and dropped on any re-scan.
+- **Audio.** Kept by default, removable with the off switch.
+- **Clip limits.** Duration, frame count, resolution and dead-clock guards refuse
+  oversized or malformed clips before anything decodes them.
+- **Metadata.** Clips follow the same strip/forged policy as photos.
+- **Tests.** 57 passing: 18 engine, 22 API, 17 video.
+
 # AmurCloak 0.9.0
 
 The first release. Find every face in a photo and cover it on your own machine,
